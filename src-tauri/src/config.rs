@@ -255,6 +255,8 @@ pub struct State {
     pub list_mode: String,
     pub sidebar_width: f64,
     pub sidebar_collapsed: bool,
+    /// Points added to font_size by Ctrl+= / Ctrl+-.
+    pub font_zoom: i32,
 }
 
 impl Default for State {
@@ -267,6 +269,7 @@ impl Default for State {
             list_mode: "recent".into(),
             sidebar_width: 280.0,
             sidebar_collapsed: false,
+            font_zoom: 0,
         }
     }
 }

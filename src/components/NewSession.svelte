@@ -1,18 +1,35 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { api, type HostInfo } from "../lib/api";
   import { fuzzyFilter } from "../lib/fuzzy";
-  import { app, basename, knownFolders, type FolderEntry } from "../lib/store.svelte";
+  import { app, basename, knownFolders, windowTarget, type FolderEntry } from "../lib/store.svelte";
   import { createSession } from "../lib/actions";
 
-  let { sessionKind }: { sessionKind: "claude" | "shell" } = $props();
+  let { initialKind, presetHost }: { initialKind?: "claude" | "shell"; presetHost?: string } = $props();
 
   const usable = (h: HostInfo) => !h.hidden && ((h.kind === "tmux" && h.connected) || h.kind === "ephemeral");
   const hosts = app.hosts.filter(usable);
-  const folders = knownFolders();
-  const defaultHost = folders.find((f) => hosts.some((h) => h.alias === f.host))?.host ?? hosts[0]?.alias ?? "local";
+  // Opened from a host heading: only that host's folders are offered. The
+  // dialog is created fresh each time, so reading the prop once is intended.
+  const preset = untrack(() => presetHost);
+  const folders = knownFolders().filter((f) => !preset || f.host === preset);
+  const defaultHost =
+    (preset && hosts.some((h) => h.alias === preset) ? preset : undefined) ??
+    folders.find((f) => hosts.some((h) => h.alias === f.host))?.host ??
+    hosts[0]?.alias ??
+    "local";
+
+  // Claude or a plain shell; defaults to the last choice made here.
+  let kind = $state<"claude" | "shell">(untrack(() => initialKind) ?? app.newKind);
+  function setKind(k: "claude" | "shell") {
+    kind = k;
+    app.newKind = k;
+    inputs[field]?.focus();
+  }
 
   let field = $state(0);
-  let folder = $state("");
+  // From a host's + button the host is settled, so start in its home folder.
+  let folder = $state(preset ? "~" : "");
   let host = $state(defaultHost);
   let hostQuery = $state(defaultHost);
   let name = $state("");
@@ -22,6 +39,7 @@
   let busy = $state(false);
 
   let inputs: HTMLInputElement[] = $state([]);
+  let target = $derived(windowTarget(host));
 
   const isPathMode = (s: string) => /^[~/]/.test(s) || /^[A-Za-z]:[\\/]/.test(s);
   let pathMode = $derived(isPathMode(folder));
@@ -62,8 +80,14 @@
     inputs[field]?.focus();
   });
 
+  /** Folder basename; for the home folder, the kind ("claude" / "shell"). */
+  function defaultName(f: string): string {
+    const t = f.trim().replace(/[\\/]+$/, "");
+    return t === "" || t === "~" ? kind : basename(t);
+  }
+
   $effect(() => {
-    if (!nameTouched) name = basename(folder.replace(/[\\/]+$/, "")) || "";
+    if (!nameTouched) name = defaultName(folder);
   });
 
   function pickFolder(f: FolderEntry, advance: boolean) {
@@ -83,13 +107,14 @@
 
   async function submit() {
     if (busy) return;
-    const n = name.trim() || basename(folder) || "session";
+    const n = name.trim() || defaultName(folder);
     if (!hosts.some((h) => h.alias === host)) {
       field = 1;
       return;
     }
     busy = true;
-    await createSession(host, folder.trim(), n, sessionKind);
+    app.newKind = kind;
+    await createSession(host, folder.trim(), n, kind);
     busy = false;
   }
 
@@ -100,7 +125,10 @@
 
   function onKey(e: KeyboardEvent) {
     const list = field === 0 ? folderItems : field === 1 ? hostItems : [];
-    if (e.key === "ArrowDown") {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.code === "KeyC" || e.code === "KeyS")) {
+      e.preventDefault();
+      setKind(e.code === "KeyC" ? "claude" : "shell");
+    } else if (e.key === "ArrowDown") {
       e.preventDefault();
       move(1, list.length);
     } else if (e.key === "ArrowUp") {
@@ -117,10 +145,16 @@
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (field === 0) {
-        if (sel >= 0 && folderItems[sel]) pickFolder(folderItems[sel], true);
+        if (preset) {
+          // Host already chosen: Enter takes the highlighted folder, if any, and creates.
+          if (sel >= 0 && folderItems[sel]) folder = folderItems[sel].path;
+          submit();
+        } else if (sel >= 0 && folderItems[sel]) pickFolder(folderItems[sel], true);
         else field = 1;
       } else if (field === 1) {
-        if (hostItems[sel]) pickHost(hostItems[sel]);
+        // Untouched query: keep the current host rather than taking the first in the list.
+        if (hostQuery === host) field = 2;
+        else if (hostItems[sel]) pickHost(hostItems[sel]);
       } else {
         submit();
       }
@@ -134,7 +168,16 @@
 
 <div class="backdrop" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && (app.overlay = null)}>
   <div class="dialog" role="dialog" aria-label="New session">
-    <div class="title">New {sessionKind === "claude" ? "Claude" : "shell"} session</div>
+    <div class="title">
+      <span>New {target ? "window" : "session"}</span>
+      <div class="kinds" role="radiogroup" aria-label="What to run">
+        <button role="radio" aria-checked={kind === "claude"} class:on={kind === "claude"} onclick={() => setKind("claude")}
+          title="Alt+C">Claude</button>
+        <button role="radio" aria-checked={kind === "shell"} class:on={kind === "shell"} onclick={() => setKind("shell")}
+          title="Alt+S">Shell</button>
+      </div>
+      <span class="faint keyhint">Alt+C / Alt+S</span>
+    </div>
     <label class:on={field === 0}>
       <span>Folder</span>
       <input
@@ -172,6 +215,12 @@
     </label>
 
     <div class="list">
+      {#if field === 0 && preset}
+        <div class="hint dim">
+          <kbd>Enter</kbd> creates {target ? "a window" : "a session"} running {kind === "claude" ? "Claude" : "a shell"} in <b>{(sel >= 0 && folderItems[sel]?.path) || folder || "~"}</b>
+          on <b>{host}</b>{#if target} (tmux session <b>{target.display_name}</b>){/if}
+        </div>
+      {/if}
       {#if field === 0}
         {#each folderItems as f, i (f.host + f.path)}
           <div class="item" class:sel={i === sel} role="option" aria-selected={i === sel} tabindex="-1"
@@ -197,8 +246,9 @@
         {/each}
       {:else}
         <div class="hint dim">
-          <kbd>Enter</kbd> creates {sessionKind === "claude" ? `claude --rc '${name || "…"}'` : "a shell"} in
+          <kbd>Enter</kbd> creates {kind === "claude" ? `claude --rc '${name || "…"}'` : "a shell"} in
           <b>{folder || "~"}</b> on <b>{host}</b>
+          {#if target}<br />as a new window in tmux session <b>{target.display_name}</b>{/if}
           {#if hosts.find((h) => h.alias === host)?.kind === "ephemeral"}<br /><span class="warn">Ephemeral: it ends when the app quits or the connection drops.</span>{/if}
         </div>
       {/if}
@@ -210,6 +260,35 @@
   .title {
     padding: 12px 14px 6px;
     font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .kinds {
+    display: flex;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px;
+  }
+  .kinds button {
+    background: transparent;
+    border: 0;
+    padding: 2px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--fg-dim);
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .kinds button.on {
+    background: var(--selected);
+    color: var(--fg);
+  }
+  .keyhint {
+    font-size: 11px;
+    font-weight: 400;
+    margin-left: auto;
   }
   label {
     display: flex;

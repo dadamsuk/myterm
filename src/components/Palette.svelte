@@ -1,9 +1,21 @@
 <script lang="ts">
-  import type { HostInfo, Session } from "../lib/api";
-  import { app, isMac, sessionByKey, setListMode, toast, visibleSessions } from "../lib/store.svelte";
+  import type { HostInfo } from "../lib/api";
+  import {
+    activeRow,
+    app,
+    isMac,
+    rowCwd,
+    rowName,
+    rowOnScreen,
+    sessionByKey,
+    setListMode,
+    toast,
+    visibleRows,
+    type Row,
+  } from "../lib/store.svelte";
   import {
     copyAttachCommand,
-    killSession,
+    killRow,
     openSettings,
     reconnectHost,
     setHostHidden,
@@ -22,13 +34,13 @@
 
   let step = $state<{ title: string; items: Choice[] } | null>(null);
 
-  function pickSession(title: string, act: (s: Session) => void) {
-    const list = visibleSessions().slice();
-    const i = list.findIndex((s) => s.key === app.active);
+  function pickRow(title: string, act: (r: Row) => void) {
+    const list = visibleRows();
+    const i = list.findIndex(rowOnScreen);
     if (i > 0) list.unshift(list.splice(i, 1)[0]);
     step = {
       title,
-      items: list.map((s) => ({ label: s.display_name, detail: `${s.host} · ${s.cwd}`, run: () => act(s) })),
+      items: list.map((r) => ({ label: rowName(r), detail: `${r.s.host} · ${rowCwd(r)}`, run: () => act(r) })),
     };
   }
 
@@ -51,14 +63,15 @@
     { label: "New shell session…", run: () => (app.overlay = { kind: "new", sessionKind: "shell" }) },
     { label: "Switch session…", keys: k && label(k.switcher, mac), run: () => (app.overlay = { kind: "switcher" }) },
     {
-      label: "Rename session",
+      label: "Rename…",
+      detail: "the window on screen; renames the tmux window",
       run: () => {
-        const s = sessionByKey(app.active);
-        if (s) app.overlay = { kind: "rename", session: s };
-        else pickSession("Rename which session?", (x) => (app.overlay = { kind: "rename", session: x }));
+        const r = activeRow();
+        if (r) app.overlay = { kind: "rename", row: r };
+        else pickRow("Rename which?", (x) => (app.overlay = { kind: "rename", row: x }));
       },
     },
-    { label: "Kill session", run: () => pickSession("Kill which session?", (s) => { done(); killSession(s); }) },
+    { label: "Kill…", run: () => pickRow("Kill which?", (r) => { done(); killRow(r); }) },
     {
       label: "Copy attach command",
       run: () => {
@@ -97,6 +110,9 @@
           (h) => (app.overlay = { kind: "hooks", host: h.alias, install: false }),
         ),
     },
+    { label: "Larger font", keys: mac ? "Cmd+=" : "Ctrl+=", run: () => { done(); terminals.zoom(1); } },
+    { label: "Smaller font", keys: mac ? "Cmd+-" : "Ctrl+-", run: () => { done(); terminals.zoom(-1); } },
+    { label: "Reset font size", keys: mac ? "Cmd+0" : "Ctrl+0", run: () => { done(); terminals.zoom(0); } },
     { label: "Toggle sidebar", keys: k && label(k.toggle_sidebar, mac), run: () => { done(); toggleSidebar(); } },
     { label: "Open settings file", run: () => { done(); openSettings(); } },
   ];

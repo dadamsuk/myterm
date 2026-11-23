@@ -1,20 +1,32 @@
 <script lang="ts">
-  import type { HostInfo, ListMode, Session } from "../lib/api";
+  import type { HostInfo, ListMode } from "../lib/api";
   import {
     app,
     basename,
-    dotClass,
-    groupedSessions,
+    groupedRows,
+    isMac,
     isReachable,
-    lastUsed,
+    multiSession,
     relTime,
+    rowCwd,
+    rowDot,
+    rowLastUsed,
+    rowName,
+    rowOnScreen,
+    rowTooltip,
     setListMode,
     setSidebar,
+    type Row,
   } from "../lib/store.svelte";
-  import { activate, hostAction, setHostHidden } from "../lib/actions";
+  import { activateRow, addHost, hostAction, openSettings, setHostHidden, toggleSidebar } from "../lib/actions";
+  import { label } from "../lib/keys";
   import { terminals } from "../lib/terminals";
 
-  let groups = $derived(groupedSessions());
+  let groups = $derived(groupedRows());
+  // 1-based position in the list; the first nine switch with Ctrl+Shift+N.
+  let numbers = $derived(new Map(groups.flatMap((g) => g.rows).map((r, i) => [r.key, i + 1])));
+  const keys = $derived(app.config?.keys);
+  const hint = (b: string | undefined) => (b ? ` (${label(b, isMac())})` : "");
   let now = $state(Date.now());
   $effect(() => {
     const t = setInterval(() => (now = Date.now()), 30000);
@@ -22,7 +34,7 @@
   });
 
   // `now` is passed so the label re-renders as time passes.
-  const ago = (s: Session, _now: number) => relTime(lastUsed(s));
+  const ago = (r: Row, _now: number) => relTime(rowLastUsed(r));
 
   const modes: { id: ListMode; label: string }[] = [
     { id: "machine", label: "Machine" },
@@ -38,9 +50,9 @@
     return "var(--red)";
   }
 
-  function onMenu(e: MouseEvent, s: Session) {
+  function onMenu(e: MouseEvent, r: Row) {
     e.preventDefault();
-    app.menu = { x: e.clientX, y: e.clientY, session: s };
+    app.menu = { x: e.clientX, y: e.clientY, row: r };
   }
 
   // Resizing
@@ -65,6 +77,26 @@
 </script>
 
 <aside style="width: {app.sidebarWidth}px">
+  <div class="tools">
+    <button title="New session{hint(keys?.new_session)}" aria-label="New session" onclick={() => (app.overlay = { kind: "new" })}>
+      <svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" /></svg>
+    </button>
+    <button title="Add a host (opens your ssh config)" aria-label="Add host" onclick={addHost}>
+      <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="10" height="4" rx="1" /><rect x="1.5" y="9.5" width="10" height="4" rx="1" /><path d="M13.5 9v5M11 11.5h5" /></svg>
+    </button>
+    <button title="Switch session{hint(keys?.switcher)}" aria-label="Switch session" onclick={() => (app.overlay = { kind: "switcher" })}>
+      <svg viewBox="0 0 16 16"><path d="M2 5h11M10 2l3 3-3 3M14 11H3M6 8l-3 3 3 3" /></svg>
+    </button>
+    <button title="Command palette{hint(keys?.palette)}" aria-label="Command palette" onclick={() => (app.overlay = { kind: "palette" })}>
+      <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></svg>
+    </button>
+    <button title="Settings (opens config.toml)" aria-label="Settings" onclick={openSettings}>
+      <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" /><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" /></svg>
+    </button>
+    <button class="collapse" title="Hide sidebar{hint(keys?.toggle_sidebar)}" aria-label="Hide sidebar" onclick={toggleSidebar}>
+      <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" /><path d="M6 2.5v11M11 6 9 8l2 2" /></svg>
+    </button>
+  </div>
   <div class="modes" role="tablist">
     {#each modes as m}
       <button role="tab" class:on={app.listMode === m.id} aria-selected={app.listMode === m.id} onclick={() => setListMode(m.id)}>
@@ -86,31 +118,44 @@
               {g.host.needs_login ? "log in" : g.host.kind === "ephemeral" ? "ephemeral" : g.host.status}
             </button>
           {/if}
+          {#if g.host && ((g.host.kind === "tmux" && g.host.connected) || g.host.kind === "ephemeral")}
+            {@const alias = g.host.alias}
+            <button
+              class="add"
+              title="New session on {alias}"
+              aria-label="New session on {alias}"
+              onclick={() => (app.overlay = { kind: "new", host: alias })}
+            >+</button>
+          {/if}
         </div>
       {/if}
-      {#each g.sessions as s (s.key)}
+      {#each g.rows as r (r.key)}
         <button
           class="row"
-          class:active={app.active === s.key}
-          class:greyed={!isReachable(s)}
-          class:eph={!s.persistent}
-          onclick={() => activate(s)}
-          oncontextmenu={(e) => onMenu(e, s)}
-          title={`${s.display_name} — ${s.host}:${s.cwd}`}
+          class:active={rowOnScreen(r)}
+          class:greyed={!isReachable(r.s)}
+          class:eph={!r.s.persistent}
+          onclick={() => activateRow(r)}
+          oncontextmenu={(e) => onMenu(e, r)}
+          title={rowTooltip(r)}
         >
-          <span class="dot {dotClass(s)}"></span>
-          <span class="name">{s.display_name}</span>
-          {#if !s.persistent}<span class="tag" title="Ends when the app quits">eph</span>{/if}
-          {#if app.listMode !== "machine"}<span class="host">{s.host}</span>{/if}
-          <span class="folder">{basename(s.cwd)}</span>
-          <span class="time">{ago(s, now)}</span>
+          <span class="num">{(numbers.get(r.key) ?? 99) <= 9 ? numbers.get(r.key) : ""}</span>
+          <span class="dot {rowDot(r)}"></span>
+          <span class="name" class:full={app.listMode === "name"}>{rowName(r)}</span>
+          {#if app.listMode !== "name"}
+          {#if !r.s.persistent}<span class="tag" title="Ends when the app quits">eph</span>{/if}
+          {#if r.s.persistent && multiSession(r.s.host)}<span class="sess" title="tmux session">{r.s.display_name}</span>{/if}
+          {#if app.listMode !== "machine"}<span class="host">{r.s.host}</span>{/if}
+          <span class="folder">{basename(rowCwd(r))}</span>
+          <span class="time">{ago(r, now)}</span>
+          {/if}
         </button>
       {/each}
-      {#if g.host && g.sessions.length === 0}
+      {#if g.host && g.rows.length === 0}
         <div class="none-row faint">no sessions</div>
       {/if}
     {/each}
-    {#if groups.every((g) => g.sessions.length === 0) && app.listMode !== "machine"}
+    {#if groups.every((g) => g.rows.length === 0) && app.listMode !== "machine"}
       <div class="empty dim">
         No sessions yet.<br />Press <kbd>{app.config?.keys.new_session ?? "Ctrl+Shift+N"}</kbd> to start one.
       </div>
@@ -162,9 +207,51 @@
     flex-direction: column;
     min-width: 0;
   }
+  .tools {
+    display: flex;
+    gap: 2px;
+    padding: 8px 8px 0;
+  }
+  .tools button {
+    background: none;
+    border: 0;
+    color: var(--fg-dim);
+    cursor: pointer;
+    padding: 5px;
+    border-radius: 5px;
+    display: flex;
+  }
+  .tools button:hover {
+    background: var(--hover);
+    color: var(--fg);
+  }
+  .tools .collapse {
+    margin-left: auto;
+  }
+  .tools svg {
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .num {
+    width: 9px;
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--fg-faint);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .name.full {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   .modes {
     display: flex;
-    margin: 10px 10px 6px;
+    margin: 6px 10px 6px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 7px;
@@ -224,6 +311,24 @@
   .hstatus:hover {
     color: var(--fg);
   }
+  .add {
+    margin-left: auto;
+    background: none;
+    border: 0;
+    color: var(--fg-faint);
+    font-size: 15px;
+    line-height: 1;
+    padding: 0 4px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .hstatus + .add {
+    margin-left: 4px;
+  }
+  .add:hover {
+    color: var(--fg);
+    background: var(--hover);
+  }
   .row {
     display: flex;
     align-items: center;
@@ -252,6 +357,15 @@
   .name {
     flex: 1 1 auto;
     min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sess {
+    font-size: 11px;
+    color: var(--fg-faint);
+    flex-shrink: 0;
+    max-width: 70px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

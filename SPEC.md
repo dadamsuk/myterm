@@ -42,7 +42,7 @@ The primary workload is long-running Claude Code sessions started with `--rc '<n
 - `ephemeral` — Windows (remote or local). Sessions exist only while the app holds them open.
 - `unavailable` — unreachable, or no tmux found.
 
-**Session.** One destination in the list. On tmux hosts it is exactly one tmux session with one window and one pane. Fields:
+**Session.** One destination in the list. On tmux hosts it is exactly one tmux session. Sessions the app creates have one window and one pane. Sessions with several windows list them under the session (5.2.1). Fields:
 
 | Field | Source |
 |---|---|
@@ -102,7 +102,11 @@ One command lists everything, one line per pane, tab-separated:
 tmux list-panes -a -F '#{session_name}\t#{@myterm_name}\t#{@myterm_kind}\t#{pane_current_path}\t#{pane_current_command}\t#{session_created}\t#{session_last_attached}\t#{session_attached}\t#{@myterm_state}\t#{@myterm_state_at}'
 ```
 
-Sessions with more than one pane or window are shown once (first pane) and still attach normally.
+The same command also prints `#{window_id}`, `#{window_index}`, `#{window_active}`, `#{pane_active}` and `#{window_name}`, so panes are grouped into windows within each session. A window's folder and kind come from its active pane. Its state is that of its panes, with `permission` winning and otherwise the most recent. A session's folder is its current window's, and its state is the same roll-up over its windows.
+
+### 5.2.1 Windows
+
+The list shows tmux windows, not sessions: every window is its own row directly under its host, with its own name (the tmux window name), folder and state dot. The tmux session level is not shown; when a host has more than one tmux session, each row carries its session's name as a small tag. Ephemeral sessions have no windows and are one row each. There is still one attach PTY per session. Clicking a window row runs `tmux select-window -t =<slug>:<window_id>` and shows the session's terminal. Since a tmux session has one current window shared by every client, any other client attached to that session follows the switch. Last-viewed times for windows are keyed `host/slug:<window_id>`, so a `done` badge on one window clears only when that window has been on screen.
 
 ### 5.3 Attaching
 
@@ -126,7 +130,14 @@ When an attach PTY exits unexpectedly (sleep, network change), the terminal pane
 
 ### 5.5 Creating a session
 
-On a tmux host, through the host channel:
+If the tmux host already has sessions, nothing new is created at session level: the new work becomes a window in the most recently used session on that host, which is then shown:
+
+```
+tmux new-window -t =<slug>: -P -F '#{window_id}' -n '<display name>' -c <dir>
+tmux send-keys  -t <window_id> "claude --rc '<display name>'" Enter
+```
+
+Otherwise, through the host channel:
 
 ```
 tmux new-session -d -s <slug> -c <dir>
@@ -159,7 +170,7 @@ Slug rules: lower-cased display name, anything outside `[a-z0-9_-]` replaced by 
 
 ### 6.2 Session list
 
-Row contents: state dot, display name, host tag, folder basename, relative last-used time. Ephemeral and unreachable sessions are visually distinct.
+Rows are tmux windows (5.2.1). Row contents: state dot, window name, session tag (only on hosts with several tmux sessions), host tag, folder basename, relative last-used time. Within a host, rows follow tmux order: session, then window index. Ephemeral and unreachable rows are visually distinct.
 
 Toggle modes:
 
@@ -171,7 +182,7 @@ Toggle modes:
 
 In every mode, sessions that need attention are pinned in a "Needs you" section at the top. This pinning can be turned off.
 
-Right-click on a row: rename, kill (immediate, no confirmation), copy the manual `ssh … tmux attach` command.
+Right-click on a row: rename, kill (immediate, no confirmation), copy the manual `ssh … tmux attach` command. Rename runs `tmux rename-window` on the host, so the name is tmux's own and shows in its status bar too. Kill runs `kill-window`; killing a session's last window ends the session.
 
 ### 6.3 Quick switcher — Ctrl+Shift+O
 
@@ -198,6 +209,10 @@ Three fields, keyboard-driven:
 3. **Name.** Pre-filled with the folder basename.
 
 Enter creates the session and attaches.
+
+In Machine mode each reachable host heading has a **+** button that opens this flow with that host chosen, the folder set to `~` and only that host's folders offered; Enter in the folder field creates at once.
+
+The form has a Claude / Shell choice (Alt+C / Alt+S). Shell runs nothing. The choice is remembered for the next time the form opens from **+**. New sessions and windows are named after the Name field (`new-session -n`, `new-window -n`).
 
 ### 6.6 Keys
 
@@ -272,6 +287,7 @@ On Windows there is no tmux to hold the state. The hook script variant writes a 
 
 - Parse `~/.ssh/config`, following `Include` directives and globs.
 - Every `Host` pattern without wildcards (`*`, `?`, `!`) becomes a host. `Match` blocks are ignored for discovery; ssh still applies them when connecting.
+- A `Host` block that contains the comment line `# myterm: ignore` is left out entirely: none of that line's aliases are listed or connected to. ssh ignores the comment. The marker only applies to the block it appears in, so it must come after the `Host` line.
 - Hosts can be hidden from the app. Hidden hosts are not connected to.
 - The local machine appears as `local`. A setting names the ssh alias that refers to this machine, so it is not listed twice.
 - The config file is watched and re-parsed on change.

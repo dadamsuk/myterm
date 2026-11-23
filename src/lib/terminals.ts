@@ -8,7 +8,7 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
 import { api, Channel, type Config, type PtyMessage, type Session } from "./api";
-import { app, hostInfo, isMac, markViewed, sessionByKey, toast } from "./store.svelte";
+import { app, fontSize, hostInfo, isMac, markViewed, sessionByKey, toast } from "./store.svelte";
 import { matches, parseBinding } from "./keys";
 
 const BACKOFF = [1, 2, 5, 10, 30];
@@ -31,6 +31,9 @@ interface Entry {
   connectedAt: number;
   lastShown: number;
   pendingInput?: string;
+  /** Input produced before the PTY id is known, e.g. xterm's reply to ConPTY's
+   *  startup cursor query; dropping it stalls the start by ~3 s. */
+  early: string[];
   ack: number;
   ackTimer?: ReturnType<typeof setTimeout>;
 }
@@ -75,7 +78,7 @@ class TerminalManager {
     const term = new Terminal({
       allowProposedApi: true,
       fontFamily: cfg?.font_family,
-      fontSize: cfg?.font_size ?? 13,
+      fontSize: fontSize(),
       lineHeight: cfg?.line_height ?? 1.1,
       theme: themeOf(cfg),
       cursorBlink: false,
@@ -121,6 +124,7 @@ class TerminalManager {
       attempt: 0,
       connectedAt: 0,
       lastShown: Date.now(),
+      early: [],
       ack: 0,
     };
     term.onData((d) => this.send(e, d));
@@ -128,6 +132,30 @@ class TerminalManager {
       if (e.pty !== null) api.resize(e.pty, cols, rows).catch(() => {});
     });
     term.attachCustomKeyEventHandler((ev) => this.keyHandler(e, ev));
+    // Right-click opens myterm's menu rather than reaching tmux's own.
+    el.addEventListener(
+      "mousedown",
+      (ev) => {
+        if (ev.button === 2) ev.stopPropagation();
+      },
+      true,
+    );
+    el.addEventListener(
+      "mouseup",
+      (ev) => {
+        if (ev.button === 2) ev.stopPropagation();
+      },
+      true,
+    );
+    el.addEventListener(
+      "contextmenu",
+      (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        app.termMenu = { x: ev.clientX, y: ev.clientY, key: e.key, selection: term.hasSelection() };
+      },
+      true,
+    );
     this.entries.set(key, e);
     return e;
   }
@@ -167,6 +195,14 @@ class TerminalManager {
 
   private send(e: Entry, data: string) {
     if (e.pty !== null) api.write(e.pty, data).catch(() => {});
+    else if (e.early.length < 64) e.early.push(data);
+  }
+
+  /** Records the PTY id and sends whatever was typed or answered before it. */
+  private setPty(e: Entry, id: number) {
+    e.pty = id;
+    const early = e.early.splice(0);
+    if (early.length) api.write(id, early.join("")).catch(() => {});
   }
 
   private setStatus(key: string, status: (typeof app.termStatus)[string]["status"], message?: string) {
@@ -227,13 +263,16 @@ class TerminalManager {
     }
     this.fitEntry(e);
     const chan = this.channel(e);
+    e.early = [];
     try {
       e.connectedAt = Date.now();
-      if (e.kind === "login") {
-        e.pty = await api.openLogin(e.host, e.term.cols, e.term.rows, chan);
-      } else {
-        e.pty = await api.attach(e.host, e.slug, e.term.cols, e.term.rows, chan);
-      }
+      const gen = e.gen;
+      const id =
+        e.kind === "login"
+          ? await api.openLogin(e.host, e.term.cols, e.term.rows, chan)
+          : await api.attach(e.host, e.slug, e.term.cols, e.term.rows, chan);
+      if (gen === e.gen) this.setPty(e, id);
+      else api.close(id).catch(() => {}); // superseded by a newer attempt
     } catch (err) {
       if (!this.entries.has(e.key)) return;
       this.scheduleReconnect(e, String(err));
@@ -320,7 +359,7 @@ class TerminalManager {
     const chan = this.channel(e);
     try {
       const r = await api.startEphemeral(host, dir, name, kind, e.term.cols, e.term.rows, chan);
-      e.pty = r.pty;
+      this.setPty(e, r.pty);
       e.pendingInput = r.input || undefined;
       this.entries.delete(tmp);
       delete app.termStatus[tmp];
@@ -356,6 +395,38 @@ class TerminalManager {
       });
     }
     if (sessionByKey(key)) markViewed(key);
+  }
+
+  /** Menu actions; each returns focus to the terminal. */
+  async copy(key: string) {
+    const e = this.entries.get(key);
+    if (e?.term.hasSelection()) await writeText(e.term.getSelection()).catch(() => {});
+    e?.term.focus();
+  }
+
+  async paste(key: string) {
+    const e = this.entries.get(key);
+    if (!e) return;
+    const t = await readText().catch(() => "");
+    if (t) e.term.paste(t);
+    e.term.focus();
+  }
+
+  selectAll(key: string) {
+    const e = this.entries.get(key);
+    e?.term.selectAll();
+    e?.term.focus();
+  }
+
+  /** Clears local scrollback; tmux sessions keep theirs on the server. */
+  clear(key: string) {
+    const e = this.entries.get(key);
+    e?.term.clear();
+    e?.term.focus();
+  }
+
+  isTmux(key: string) {
+    return this.entries.get(key)?.kind === "tmux";
   }
 
   focusActive() {
@@ -405,10 +476,24 @@ class TerminalManager {
     }
   }
 
+  /** Changes the font size of every terminal; each refits and tells its PTY. */
+  zoom(delta: number) {
+    const before = fontSize();
+    app.fontZoom = delta === 0 ? 0 : app.fontZoom + delta;
+    // Keep the stored offset inside the clamp, so zooming back responds at once.
+    app.fontZoom = fontSize() - (app.config?.font_size ?? 13);
+    api.setUiState({ fontZoom: app.fontZoom }).catch(() => {});
+    const size = fontSize();
+    if (size === before) return;
+    for (const e of this.entries.values()) e.term.options.fontSize = size;
+    for (const e of this.entries.values()) this.fitEntry(e);
+    toast(`Font size ${size}${app.fontZoom ? "" : " (default)"}`);
+  }
+
   applyConfig(cfg: Config) {
     for (const e of this.entries.values()) {
       e.term.options.fontFamily = cfg.font_family;
-      e.term.options.fontSize = cfg.font_size;
+      e.term.options.fontSize = fontSize();
       e.term.options.lineHeight = cfg.line_height;
       e.term.options.theme = themeOf(cfg);
     }

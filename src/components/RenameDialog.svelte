@@ -1,11 +1,10 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import type { Session } from "../lib/api";
-  import { app } from "../lib/store.svelte";
-  import { renameSession } from "../lib/actions";
+  import { app, rowName, type Row } from "../lib/store.svelte";
+  import { renameRow } from "../lib/actions";
 
-  let { session }: { session: Session } = $props();
-  let name = $state(untrack(() => session.display_name));
+  let { row }: { row: Row } = $props();
+  let name = $state(untrack(() => rowName(row)));
   let input: HTMLInputElement;
 
   $effect(() => {
@@ -16,15 +15,23 @@
   function key(e: KeyboardEvent) {
     if (e.key === "Enter") {
       e.preventDefault();
+      // `row` reads app.overlay, so take it before closing the dialog.
+      const r = row;
       app.overlay = null;
-      renameSession(session, name);
+      renameRow(r, name);
     }
   }
 </script>
 
 <div class="backdrop" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && (app.overlay = null)}>
-  <div class="dialog" role="dialog" aria-label="Rename session">
+  <div class="dialog" role="dialog" aria-label="Rename">
     <input class="query" bind:this={input} bind:value={name} onkeydown={key} spellcheck="false" />
-    <div class="empty">Rename <b>{session.display_name}</b> on {session.host}. The tmux session name stays <code>{session.slug}</code>.</div>
+    <div class="empty">
+      {#if row.w}
+        Rename window <b>{row.w.name}</b> on {row.s.host}. This renames the tmux window, so tmux shows the new name too.
+      {:else}
+        Rename <b>{row.s.display_name}</b> on {row.s.host}.
+      {/if}
+    </div>
   </div>
 </div>

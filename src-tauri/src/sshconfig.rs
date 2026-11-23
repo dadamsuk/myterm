@@ -12,46 +12,87 @@ pub struct Parsed {
     pub files: Vec<PathBuf>,
 }
 
+struct State {
+    p: Parsed,
+    /// Aliases from `Host` blocks marked with `# myterm: ignore`.
+    ignored: Vec<String>,
+}
+
+impl State {
+    fn new() -> Self {
+        State { p: Parsed { hosts: vec![], files: vec![] }, ignored: vec![] }
+    }
+
+    fn finish(mut self) -> Parsed {
+        let ignored = self.ignored;
+        self.p.hosts.retain(|h| !ignored.contains(h));
+        self.p
+    }
+}
+
 pub fn parse() -> Parsed {
-    let mut p = Parsed { hosts: vec![], files: vec![] };
-    parse_file(&ssh_dir().join("config"), &mut p, 0);
-    p
+    let mut s = State::new();
+    parse_file(&ssh_dir().join("config"), &mut s, 0);
+    s.finish()
 }
 
 #[cfg(test)]
 pub fn parse_str(text: &str) -> Vec<String> {
-    let mut p = Parsed { hosts: vec![], files: vec![] };
-    parse_text(text, &mut p, 0);
-    p.hosts
+    let mut s = State::new();
+    parse_text(text, &mut s, 0);
+    s.finish().hosts
 }
 
-fn parse_file(path: &Path, out: &mut Parsed, depth: usize) {
-    if depth > 16 || out.files.iter().any(|f| f == path) {
+/// True for a comment line such as `# myterm: ignore` or `#myterm ignore`.
+fn is_ignore_marker(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('#') else { return false };
+    let rest = rest.trim().to_ascii_lowercase();
+    let Some(rest) = rest.strip_prefix("myterm") else { return false };
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(':').unwrap_or(rest).trim();
+    rest == "ignore"
+}
+
+fn parse_file(path: &Path, out: &mut State, depth: usize) {
+    if depth > 16 || out.p.files.iter().any(|f| f == path) {
         return;
     }
-    out.files.push(path.to_path_buf());
+    out.p.files.push(path.to_path_buf());
     if let Ok(text) = std::fs::read_to_string(path) {
         parse_text(&text, out, depth);
     }
 }
 
-fn parse_text(text: &str, out: &mut Parsed, depth: usize) {
+fn parse_text(text: &str, out: &mut State, depth: usize) {
+    // Aliases named by the `Host` line of the block we are currently in.
+    let mut block: Vec<String> = vec![];
     for raw in text.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('#') {
+            if is_ignore_marker(line) {
+                out.ignored.extend(block.iter().cloned());
+            }
             continue;
         }
         let (key, rest) = split_keyword(line);
         let args = split_args(rest);
         match key.to_ascii_lowercase().as_str() {
             "host" => {
+                block.clear();
                 for a in args {
-                    if a.contains(['*', '?', '!']) || out.hosts.contains(&a) {
+                    if a.contains(['*', '?', '!']) {
                         continue;
                     }
-                    out.hosts.push(a);
+                    block.push(a.clone());
+                    if !out.p.hosts.contains(&a) {
+                        out.p.hosts.push(a);
+                    }
                 }
             }
+            "match" => block.clear(),
             "include" => {
                 for a in args {
                     for path in expand_include(&a) {
@@ -128,5 +169,27 @@ mod tests {
     fn parses_hosts() {
         let text = "Host a b\n  HostName x\nHost *.corp c?\nHost=d\nHost \"e f\" !g\nMatch host z\n  User q\nhost a\n";
         assert_eq!(parse_str(text), vec!["a", "b", "d", "e f"]);
+    }
+
+    #[test]
+    fn ignore_marker() {
+        let text = "\
+# myterm: ignore
+Host a
+  HostName x
+Host b c
+  # myterm: ignore
+  User q
+Host d
+  #MyTerm ignore
+Host e
+  # myterm: ignored-not-really
+Match host f
+  # myterm: ignore
+Host g
+";
+        assert_eq!(parse_str(text), vec!["a", "e", "g"]);
+        assert!(is_ignore_marker("#myterm:ignore"));
+        assert!(!is_ignore_marker("# not myterm: ignore"));
     }
 }

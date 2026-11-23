@@ -33,6 +33,8 @@ pub struct HostInfo {
     pub tmux: Option<String>,
     pub tmux_version: Option<String>,
     pub home: Option<String>,
+    /// Remote login name, from the bootstrap.
+    pub user: Option<String>,
     pub hidden: bool,
     pub local: bool,
     pub win_powershell: bool,
@@ -80,6 +82,7 @@ impl Ephemeral {
             persistent: false,
             ephemeral_id: Some(self.id),
             ended: self.ended,
+            windows: vec![],
         }
     }
 }
@@ -211,6 +214,7 @@ impl App {
                     status: if hidden { "hidden".into() } else { "connecting".into() },
                     hidden,
                     local: is_local,
+                    user: if is_local { std::env::var("USERNAME").or_else(|_| std::env::var("USER")).ok() } else { None },
                     ..Default::default()
                 }),
                 channel: Mutex::new(None),
@@ -336,6 +340,41 @@ impl App {
         Ok(slug)
     }
 
+    /// Adds a window to an existing tmux session; returns the window id.
+    pub async fn create_window(&self, host: &str, slug: &str, dir: &str, name: &str, kind: &str) -> Result<String> {
+        let h = self.host(host)?;
+        let home = h.info.lock().unwrap().home.clone().unwrap_or_default();
+        let dir = tmux::expand_home(dir.trim(), &home);
+        let dir = if dir.is_empty() { home.clone() } else { dir };
+        let t = self.tmux_of(&h)?;
+        let out = self.run(&h, &tmux::new_window_script(&t, slug, name, &dir, kind)).await?;
+        let id = out
+            .lines()
+            .find_map(|l| l.strip_prefix("WIN="))
+            .filter(|s| s.starts_with('@'))
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("new window failed: {out}"))?;
+        self.touch_folder(host, &dir);
+        self.refresh(&h).await;
+        Ok(id)
+    }
+
+    pub async fn rename_window(&self, host: &str, slug: &str, window_id: &str, name: &str) -> Result<()> {
+        let h = self.host(host)?;
+        let t = self.tmux_of(&h)?;
+        self.run(&h, &tmux::rename_window_script(&t, slug, window_id, name)).await?;
+        self.refresh(&h).await;
+        Ok(())
+    }
+
+    pub async fn kill_window(&self, host: &str, slug: &str, window_id: &str) -> Result<()> {
+        let h = self.host(host)?;
+        let t = self.tmux_of(&h)?;
+        self.run(&h, &tmux::kill_window_script(&t, slug, window_id)).await?;
+        self.refresh(&h).await;
+        Ok(())
+    }
+
     pub async fn rename_session(&self, host: &str, slug: &str, name: &str) -> Result<()> {
         if let Some(id) = slug.strip_prefix("~eph-").and_then(|s| s.parse::<u64>().ok()) {
             if let Some(e) = self.ephemerals.lock().unwrap().iter_mut().find(|e| e.id == id) {
@@ -361,6 +400,15 @@ impl App {
         let h = self.host(host)?;
         let t = self.tmux_of(&h)?;
         self.run(&h, &tmux::kill_script(&t, slug)).await?;
+        self.refresh(&h).await;
+        Ok(())
+    }
+
+    /// Makes a window the session's current one; every attached client follows.
+    pub async fn select_window(&self, host: &str, slug: &str, window_id: &str) -> Result<()> {
+        let h = self.host(host)?;
+        let t = self.tmux_of(&h)?;
+        self.run(&h, &tmux::select_window_script(&t, slug, window_id)).await?;
         self.refresh(&h).await;
         Ok(())
     }
@@ -844,6 +892,7 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
                 let status = match (&b.tmux, &b.version) {
                     (None, _) => "tmux not found".to_string(),
                     (Some(_), Some(v)) if !tmux::version_ok(v) => format!("{v} is older than 3.2"),
+                    (Some(t), None) => format!("can't run tmux at {t}"),
                     _ => "connected".to_string(),
                 };
                 {
@@ -868,6 +917,7 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
                     i.tmux = b.tmux.clone();
                     i.tmux_version = b.version.clone();
                     i.home = Some(b.home.clone());
+                    i.user = (!b.user.is_empty()).then(|| b.user.clone());
                     i.hooks_installed = hooks_installed;
                 });
                 if !tmux_ok {
@@ -880,14 +930,20 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
                     loop {
                         match ch.run(&script, Duration::from_secs(15)).await {
                             Ok(r) => {
-                                if let ListResult::Sessions(s) = tmux::parse_list(&h.alias, r.code, &r.out) {
-                                    let changed = *h.sessions.lock().unwrap() != s;
-                                    if changed {
-                                        app.remember_folders(&h.alias, &s);
-                                        *h.sessions.lock().unwrap() = s;
-                                        app.emit_snapshot();
+                                let status = match tmux::parse_list(&h.alias, r.code, &r.out) {
+                                    ListResult::Sessions(s) => {
+                                        let changed = *h.sessions.lock().unwrap() != s;
+                                        if changed {
+                                            app.remember_folders(&h.alias, &s);
+                                            *h.sessions.lock().unwrap() = s;
+                                            app.emit_snapshot();
+                                        }
+                                        "connected".to_string()
                                     }
-                                }
+                                    // Shown on the host instead of a silently empty list.
+                                    ListResult::Error(e) => format!("tmux: {e}"),
+                                };
+                                app.set_info(&h, |i| i.status = status);
                             }
                             Err(_) => break,
                         }

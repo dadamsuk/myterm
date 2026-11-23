@@ -3,10 +3,10 @@
   import { listen } from "@tauri-apps/api/event";
   import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
   import { api, type Config, type Snapshot } from "./lib/api";
-  import { app, isMac, sessionByKey, toast } from "./lib/store.svelte";
+  import { activeWindow, app, isMac, sessionByKey, sidebarRows, toast, windowKey } from "./lib/store.svelte";
   import { terminals } from "./lib/terminals";
   import { matches, parseBinding } from "./lib/keys";
-  import { toggleSidebar } from "./lib/actions";
+  import { activateRow, toggleSidebar } from "./lib/actions";
   import Sidebar from "./components/Sidebar.svelte";
   import Header from "./components/Header.svelte";
   import TerminalPane from "./components/TerminalPane.svelte";
@@ -17,6 +17,7 @@
   import HookDialog from "./components/HookDialog.svelte";
   import ConfirmQuit from "./components/ConfirmQuit.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
+  import TermMenu from "./components/TermMenu.svelte";
 
   function applySnapshot(s: Snapshot) {
     const before = new Map(app.sessions.map((x) => [x.key, x.state]));
@@ -60,10 +61,24 @@
     if (matches(e, parseBinding(k.new_session), mac))
       return act(() => (app.overlay = { kind: "new", sessionKind: "claude" }));
     if (matches(e, parseBinding(k.toggle_sidebar), mac)) return act(toggleSidebar);
-    if (e.key === "Escape" && (app.overlay || app.menu)) {
+    // Ctrl+= / Ctrl+- / Ctrl+0 (Cmd on macOS): terminal font size.
+    if ((mac ? e.metaKey : e.ctrlKey) && !e.altKey && !(mac ? e.ctrlKey : e.metaKey)) {
+      if (!e.shiftKey && (e.code === "Equal" || e.code === "NumpadAdd")) return act(() => terminals.zoom(1));
+      if (e.shiftKey && e.code === "Equal") return act(() => terminals.zoom(1)); // Ctrl++ on layouts where + needs Shift
+      if (!e.shiftKey && (e.code === "Minus" || e.code === "NumpadSubtract")) return act(() => terminals.zoom(-1));
+      if (!e.shiftKey && (e.code === "Digit0" || e.code === "Numpad0")) return act(() => terminals.zoom(0));
+    }
+    // Ctrl+Shift+1..9 (Cmd+Shift on macOS): the numbered rows in the sidebar.
+    const digit = /^Digit([1-9])$/.exec(e.code);
+    if (digit && e.shiftKey && !e.altKey && (mac ? e.metaKey : e.ctrlKey)) {
+      const r = sidebarRows()[Number(digit[1]) - 1];
+      return act(() => r && activateRow(r));
+    }
+    if (e.key === "Escape" && (app.overlay || app.menu || app.termMenu)) {
       return act(() => {
         app.overlay = null;
         app.menu = null;
+        app.termMenu = null;
         terminals.focusActive();
       });
     }
@@ -77,10 +92,16 @@
   // A session viewed while "done" arrives counts as seen.
   $effect(() => {
     const s = sessionByKey(app.active);
-    if (s && s.state === "done" && s.state_at > (app.lastViewed[s.key] ?? 0) && document.hasFocus()) {
-      app.lastViewed[s.key] = s.state_at;
-      api.markViewed(s.key).catch(() => {});
-    }
+    if (!s || !document.hasFocus()) return;
+    const seen = (key: string, state: string | null, at: number) => {
+      if (state === "done" && at > (app.lastViewed[key] ?? 0)) {
+        app.lastViewed[key] = at;
+        api.markViewed(key).catch(() => {});
+      }
+    };
+    seen(s.key, s.state, s.state_at);
+    const w = activeWindow(s);
+    if (w) seen(windowKey(s, w), w.state, w.state_at);
   });
 
   onMount(() => {
@@ -94,6 +115,7 @@
       app.listMode = b.state.list_mode ?? "recent";
       app.sidebarWidth = b.state.sidebar_width || 280;
       app.sidebarCollapsed = !!b.state.sidebar_collapsed;
+      app.fontZoom = b.state.font_zoom ?? 0;
       applyConfig(b.config, b.config_error);
       applySnapshot(b.snapshot);
       app.ready = true;
@@ -129,9 +151,9 @@
 {:else if app.overlay?.kind === "palette"}
   <Palette />
 {:else if app.overlay?.kind === "new"}
-  <NewSession sessionKind={app.overlay.sessionKind} />
+  <NewSession initialKind={app.overlay.sessionKind} presetHost={app.overlay.host} />
 {:else if app.overlay?.kind === "rename"}
-  <RenameDialog session={app.overlay.session} />
+  <RenameDialog row={app.overlay.row} />
 {:else if app.overlay?.kind === "hooks"}
   <HookDialog host={app.overlay.host} install={app.overlay.install} />
 {:else if app.overlay?.kind === "confirm-quit"}
@@ -140,6 +162,9 @@
 
 {#if app.menu}
   <ContextMenu />
+{/if}
+{#if app.termMenu}
+  <TermMenu />
 {/if}
 
 {#if app.toast}

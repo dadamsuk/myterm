@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { app, hostInfo, sessionByKey } from "../lib/store.svelte";
+  import { activeRow, app, hostInfo, multiSession, rowCwd, rowName, rowState, rowsOf, sessionByKey } from "../lib/store.svelte";
   import { toggleSidebar } from "../lib/actions";
 
   let session = $derived(sessionByKey(app.active));
+  // The window on screen: its name, folder and state.
+  let row = $derived(activeRow() ?? (session ? rowsOf(session)[0] : undefined));
   let loginHost = $derived(app.active?.startsWith("login:") ? app.active.slice(6) : null);
   let host = $derived(hostInfo(session?.host ?? loginHost ?? ""));
   let term = $derived(app.active ? app.termStatus[app.active] : undefined);
@@ -27,13 +29,15 @@
       <line x1="6" y1="2.5" x2="6" y2="13.5" />
     </svg>
   </button>
-  {#if session}
-    <span class="title">{session.display_name}</span>
+  {#if session && row}
+    {@const st = rowState(row)}
+    <span class="title">{rowName(row)}</span>
     <span class="tag">{session.host}</span>
+    {#if session.persistent && multiSession(session.host)}<span class="win">{session.display_name}</span>{/if}
     {#if !session.persistent}<span class="tag eph">ephemeral</span>{/if}
-    <span class="cwd" title={session.cwd}>{session.cwd}</span>
-    {#if session.state && !session.ended}
-      <span class="state {session.state}"><span class="dot {session.state}"></span>{stateLabel[session.state] ?? session.state}</span>
+    <span class="cwd" title={rowCwd(row)}>{rowCwd(row)}</span>
+    {#if st && !session.ended}
+      <span class="state {st}"><span class="dot {st}"></span>{stateLabel[st] ?? st}</span>
     {/if}
     <span class="conn" class:bad={conn !== "connected"}>{conn}</span>
   {:else if loginHost}
@@ -73,6 +77,10 @@
   }
   .title {
     font-weight: 600;
+  }
+  .win {
+    color: var(--fg-faint);
+    font-size: 12px;
   }
   .tag.eph {
     color: var(--yellow);

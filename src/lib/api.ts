@@ -40,6 +40,7 @@ export interface HostInfo {
   local: boolean;
   win_powershell: boolean;
   hooks_installed: boolean;
+  user: string | null;
 }
 
 export interface Session {
@@ -57,6 +58,21 @@ export interface Session {
   persistent: boolean;
   ephemeral_id: number | null;
   ended: boolean;
+  /** tmux windows ordered by index; empty for ephemeral sessions. */
+  windows: Window[];
+}
+
+export interface Window {
+  /** tmux window id, e.g. "@3". */
+  id: string;
+  index: number;
+  name: string;
+  /** The session's current window. */
+  active: boolean;
+  kind: "claude" | "shell";
+  cwd: string;
+  state: "working" | "permission" | "done" | null;
+  state_at: number;
 }
 
 export interface Snapshot {
@@ -70,6 +86,7 @@ export interface UiState {
   list_mode: ListMode;
   sidebar_width: number;
   sidebar_collapsed: boolean;
+  font_zoom: number;
 }
 
 export type ListMode = "machine" | "name" | "recent";
@@ -119,6 +136,13 @@ export const api = {
     invoke<string>("create_session", { host, dir, name, kind }),
   renameSession: (host: string, slug: string, name: string) => invoke<void>("rename_session", { host, slug, name }),
   killSession: (host: string, slug: string) => invoke<void>("kill_session", { host, slug }),
+  createWindow: (host: string, slug: string, dir: string, name: string, kind: string) =>
+    invoke<string>("create_window", { host, slug, dir, name, kind }),
+  renameWindow: (host: string, slug: string, window: string, name: string) =>
+    invoke<void>("rename_window", { host, slug, window, name }),
+  killWindow: (host: string, slug: string, window: string) => invoke<void>("kill_window", { host, slug, window }),
+  selectWindow: (host: string, slug: string, window: string) =>
+    invoke<void>("select_window", { host, slug, window }),
   completePath: (host: string, prefix: string) => invoke<string[]>("complete_path", { host, prefix }),
   attachCommandText: (host: string, slug: string) => invoke<string>("attach_command_text", { host, slug }),
   reconnectHost: (host: string) => invoke<void>("reconnect_host", { host }),
@@ -126,10 +150,12 @@ export const api = {
   hooksPlan: (host: string, install: boolean) => invoke<HookPlan>("hooks_plan", { host, install }),
   hooksApply: (host: string, install: boolean) => invoke<void>("hooks_apply", { host, install }),
   markViewed: (key: string) => invoke<void>("mark_viewed", { key }),
-  setUiState: (s: { listMode?: ListMode; sidebarWidth?: number; sidebarCollapsed?: boolean }) =>
+  setUiState: (s: { listMode?: ListMode; sidebarWidth?: number; sidebarCollapsed?: boolean; fontZoom?: number }) =>
     invoke<void>("set_ui_state", s),
   getState: () => invoke<UiState>("get_state"),
   configPath: () => invoke<string>("config_path"),
+  openConfig: () => invoke<void>("open_config"),
+  openSshConfig: () => invoke<void>("open_ssh_config"),
   quit: () => invoke<void>("quit"),
 };
 

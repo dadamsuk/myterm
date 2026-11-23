@@ -1,7 +1,17 @@
 <script lang="ts">
-  import type { Session } from "../lib/api";
-  import { basename, dotClass, isReachable, lastUsed, relTime, switcherOrder } from "../lib/store.svelte";
-  import { activate } from "../lib/actions";
+  import {
+    basename,
+    isReachable,
+    multiSession,
+    relTime,
+    rowCwd,
+    rowDot,
+    rowLastUsed,
+    rowName,
+    switcherOrder,
+    type Row,
+  } from "../lib/store.svelte";
+  import { activateRow } from "../lib/actions";
   import Picker from "./Picker.svelte";
 
   const items = switcherOrder();
@@ -9,17 +19,18 @@
 
 <Picker
   {items}
-  text={(s: Session) => `${s.display_name} ${s.cwd} ${s.host}`}
-  onpick={activate}
-  placeholder="Switch to session…"
+  text={(r: Row) => `${rowName(r)} ${rowCwd(r)} ${r.s.host} ${r.s.display_name}`}
+  onpick={activateRow}
+  placeholder="Switch to…"
   empty="No sessions"
 >
-  {#snippet row(s: Session)}
-    <span class="dot {dotClass(s)}"></span>
-    <span class="name" class:greyed={!isReachable(s)}>{s.display_name}</span>
-    <span class="tag">{s.host}</span>
-    <span class="path faint">{basename(s.cwd)}</span>
-    <span class="t faint">{relTime(lastUsed(s))}</span>
+  {#snippet row(r: Row)}
+    <span class="dot {rowDot(r)}"></span>
+    <span class="name" class:greyed={!isReachable(r.s)}>{rowName(r)}</span>
+    <span class="tag">{r.s.host}</span>
+    {#if r.s.persistent && multiSession(r.s.host)}<span class="faint sess">{r.s.display_name}</span>{/if}
+    <span class="path faint">{basename(rowCwd(r))}</span>
+    <span class="t faint">{relTime(rowLastUsed(r))}</span>
   {/snippet}
 </Picker>
 
@@ -30,6 +41,9 @@
   }
   .greyed {
     opacity: 0.5;
+  }
+  .sess {
+    font-size: 11px;
   }
   .path {
     font-size: 12px;

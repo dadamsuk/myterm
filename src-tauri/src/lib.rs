@@ -131,6 +131,33 @@ async fn kill_session(app: State<'_, Arc<App>>, host: String, slug: String) -> R
 }
 
 #[tauri::command]
+async fn create_window(
+    app: State<'_, Arc<App>>,
+    host: String,
+    slug: String,
+    dir: String,
+    name: String,
+    kind: String,
+) -> R<String> {
+    app.create_window(&host, &slug, &dir, &name, &kind).await.map_err(err)
+}
+
+#[tauri::command]
+async fn rename_window(app: State<'_, Arc<App>>, host: String, slug: String, window: String, name: String) -> R<()> {
+    app.rename_window(&host, &slug, &window, &name).await.map_err(err)
+}
+
+#[tauri::command]
+async fn kill_window(app: State<'_, Arc<App>>, host: String, slug: String, window: String) -> R<()> {
+    app.kill_window(&host, &slug, &window).await.map_err(err)
+}
+
+#[tauri::command]
+async fn select_window(app: State<'_, Arc<App>>, host: String, slug: String, window: String) -> R<()> {
+    app.select_window(&host, &slug, &window).await.map_err(err)
+}
+
+#[tauri::command]
 async fn complete_path(app: State<'_, Arc<App>>, host: String, prefix: String) -> R<Vec<String>> {
     app.complete_path(&host, &prefix).await.map_err(err)
 }
@@ -169,7 +196,13 @@ fn mark_viewed(app: State<Arc<App>>, key: String) {
 }
 
 #[tauri::command]
-fn set_ui_state(app: State<Arc<App>>, list_mode: Option<String>, sidebar_width: Option<f64>, sidebar_collapsed: Option<bool>) {
+fn set_ui_state(
+    app: State<Arc<App>>,
+    list_mode: Option<String>,
+    sidebar_width: Option<f64>,
+    sidebar_collapsed: Option<bool>,
+    font_zoom: Option<i32>,
+) {
     let mut st = app.state.lock().unwrap();
     if let Some(m) = list_mode {
         st.list_mode = m;
@@ -179,6 +212,9 @@ fn set_ui_state(app: State<Arc<App>>, list_mode: Option<String>, sidebar_width: 
     }
     if let Some(c) = sidebar_collapsed {
         st.sidebar_collapsed = c;
+    }
+    if let Some(z) = font_zoom {
+        st.font_zoom = z;
     }
     drop(st);
     app.mark_state_dirty();
@@ -192,6 +228,50 @@ fn get_state(app: State<Arc<App>>) -> config::State {
 #[tauri::command]
 fn config_path() -> String {
     config::config_path().to_string_lossy().to_string()
+}
+
+/// Opens config.toml in the default editor. Done here rather than through the
+/// opener plugin from JS, whose path scope would otherwise have to allow it.
+#[tauri::command]
+fn open_config(handle: tauri::AppHandle) -> R<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = config::config_path();
+    if !path.exists() {
+        config::load_config(); // writes the commented template
+    }
+    let p = path.to_string_lossy().to_string();
+    match handle.opener().open_path(&p, None::<&str>) {
+        Ok(()) => Ok(()),
+        // .toml often has no associated program on Windows.
+        #[cfg(windows)]
+        Err(_) => std::process::Command::new("notepad.exe").arg(&p).spawn().map(|_| ()).map_err(err),
+        #[cfg(not(windows))]
+        Err(e) => Err(err(e)),
+    }
+}
+
+/// Opens ~/.ssh/config, where hosts are added; myterm picks up changes itself.
+#[tauri::command]
+fn open_ssh_config(handle: tauri::AppHandle) -> R<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = sshconfig::ssh_dir().join("config");
+    if !path.exists() {
+        std::fs::create_dir_all(sshconfig::ssh_dir()).map_err(err)?;
+        std::fs::write(&path, "# Add a host:
+# Host myserver
+#   HostName 192.0.2.10
+#   User me
+").map_err(err)?;
+    }
+    let p = path.to_string_lossy().to_string();
+    match handle.opener().open_path(&p, None::<&str>) {
+        Ok(()) => Ok(()),
+        // A file without an extension has no associated program on Windows.
+        #[cfg(windows)]
+        Err(_) => std::process::Command::new("notepad.exe").arg(&p).spawn().map(|_| ()).map_err(err),
+        #[cfg(not(windows))]
+        Err(e) => Err(err(e)),
+    }
 }
 
 #[tauri::command]
@@ -221,7 +301,8 @@ fn save_window(handle: &tauri::AppHandle, app: &App) {
         let mut g = st.window.clone().unwrap_or_default();
         g.maximized = maximized;
         if !maximized && !w.is_minimized().unwrap_or(false) {
-            if let (Ok(p), Ok(s)) = (w.outer_position(), w.outer_size()) {
+            // inner_size, because set_size on restore sets the inner size.
+            if let (Ok(p), Ok(s)) = (w.outer_position(), w.inner_size()) {
                 g.x = p.x;
                 g.y = p.y;
                 g.width = s.width;
@@ -315,6 +396,16 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Record geometry as it changes, so it survives a crash or forced quit;
+            // the 2 s state writer persists it.
+            if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+                let handle = window.app_handle();
+                if let Some(app) = handle.try_state::<Arc<App>>() {
+                    save_window(handle, &app);
+                    app.mark_state_dirty();
+                }
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let handle = window.app_handle();
                 let app = handle.state::<Arc<App>>();
@@ -345,6 +436,10 @@ pub fn run() {
             create_session,
             rename_session,
             kill_session,
+            select_window,
+            create_window,
+            rename_window,
+            kill_window,
             complete_path,
             attach_command_text,
             reconnect_host,
@@ -355,6 +450,8 @@ pub fn run() {
             set_ui_state,
             get_state,
             config_path,
+            open_config,
+            open_ssh_config,
             quit
         ])
         .run(tauri::generate_context!())

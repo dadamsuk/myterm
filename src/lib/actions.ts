@@ -1,7 +1,6 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { api, type HostInfo, type Session } from "./api";
-import { app, hostInfo, isReachable, setSidebar, toast } from "./store.svelte";
+import { api, type HostInfo, type Session, type Window } from "./api";
+import { app, hostInfo, isReachable, setSidebar, toast, windowTarget, type Row } from "./store.svelte";
 import { terminals } from "./terminals";
 
 export function activate(s: Session) {
@@ -16,6 +15,48 @@ export function activate(s: Session) {
     return;
   }
   terminals.open(s);
+}
+
+/** Shows a session's terminal and makes one of its windows current. */
+export async function activateWindow(s: Session, w: Window) {
+  if (!isReachable(s)) {
+    toast(`${s.host} is not reachable`, true);
+    return;
+  }
+  if (!w.active) {
+    // Reflect the switch at once; the next poll confirms it.
+    for (const x of s.windows) x.active = x.id === w.id;
+    api.selectWindow(s.host, s.slug, w.id).catch((e) => toast(String(e), true));
+  }
+  activate(s);
+}
+
+export function activateRow(r: Row) {
+  if (r.w) activateWindow(r.s, r.w);
+  else activate(r.s);
+}
+
+/** Kills a window; the last window of a session takes the session with it. */
+export async function killRow(r: Row) {
+  if (!r.w || r.s.windows.length <= 1) return killSession(r.s);
+  app.menu = null;
+  try {
+    await api.killWindow(r.s.host, r.s.slug, r.w.id);
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
+/** Renames the tmux window on the server, so tmux shows the name too. */
+export async function renameRow(r: Row, name: string) {
+  const n = name.trim();
+  if (!r.w) return renameSession(r.s, n);
+  if (!n || n === r.w.name) return;
+  try {
+    await api.renameWindow(r.s.host, r.s.slug, r.w.id, n);
+  } catch (e) {
+    toast(String(e), true);
+  }
 }
 
 export async function killSession(s: Session) {
@@ -58,6 +99,20 @@ export async function createSession(host: string, dir: string, name: string, kin
     return;
   }
   if (h.kind !== "tmux" || !h.connected) return toast(`${host} is not available: ${h.status}`, true);
+  const target = windowTarget(host);
+  if (target) {
+    try {
+      const id = await api.createWindow(host, target.slug, dir, name, kind);
+      // The backend refreshes before returning; mark the new window current
+      // in case that poll raced the switch.
+      const s = app.sessions.find((x) => x.key === target.key) ?? target;
+      for (const w of s.windows) w.active = w.id === id;
+      terminals.open(s);
+    } catch (e) {
+      toast(String(e), true);
+    }
+    return;
+  }
   try {
     const slug = await api.createSession(host, dir, name, kind);
     const key = `${host}/${slug}`;
@@ -79,6 +134,7 @@ export async function createSession(host: string, dir: string, name: string, kin
         persistent: true,
         ephemeral_id: null,
         ended: false,
+        windows: [],
       } as Session);
     terminals.open(s);
   } catch (e) {
@@ -114,7 +170,17 @@ export async function setHostHidden(alias: string, hidden: boolean) {
 
 export async function openSettings() {
   try {
-    await openPath(await api.configPath());
+    await api.openConfig();
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
+/** Hosts come from ~/.ssh/config; adding one means editing it. */
+export async function addHost() {
+  try {
+    await api.openSshConfig();
+    toast("Add a Host block to your ssh config; myterm picks it up when you save");
   } catch (e) {
     toast(String(e), true);
   }
