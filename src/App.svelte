@@ -6,7 +6,7 @@
   import { activeWindow, app, isMac, sessionByKey, sidebarRows, toast, windowKey } from "./lib/store.svelte";
   import { terminals } from "./lib/terminals";
   import { matches, parseBinding } from "./lib/keys";
-  import { activateRow, toggleSidebar } from "./lib/actions";
+  import { activateRow, peekSidebar, toggleSidebar } from "./lib/actions";
   import Sidebar from "./components/Sidebar.svelte";
   import Header from "./components/Header.svelte";
   import TerminalPane from "./components/TerminalPane.svelte";
@@ -16,6 +16,7 @@
   import RenameDialog from "./components/RenameDialog.svelte";
   import HookDialog from "./components/HookDialog.svelte";
   import ConfirmQuit from "./components/ConfirmQuit.svelte";
+  import HostsDialog from "./components/HostsDialog.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
   import TermMenu from "./components/TermMenu.svelte";
 
@@ -61,6 +62,7 @@
     if (matches(e, parseBinding(k.new_session), mac))
       return act(() => (app.overlay = { kind: "new", sessionKind: "claude" }));
     if (matches(e, parseBinding(k.toggle_sidebar), mac)) return act(toggleSidebar);
+    if (matches(e, parseBinding(k.peek_sidebar || "Ctrl+Alt+B"), mac)) return act(peekSidebar);
     // Ctrl+= / Ctrl+- / Ctrl+0 (Cmd on macOS): terminal font size.
     if ((mac ? e.metaKey : e.ctrlKey) && !e.altKey && !(mac ? e.ctrlKey : e.metaKey)) {
       if (!e.shiftKey && (e.code === "Equal" || e.code === "NumpadAdd")) return act(() => terminals.zoom(1));
@@ -74,14 +76,43 @@
       const r = sidebarRows()[Number(digit[1]) - 1];
       return act(() => r && activateRow(r));
     }
-    if (e.key === "Escape" && (app.overlay || app.menu || app.termMenu)) {
+    if (e.key === "Escape" && (app.overlay || app.menu || app.termMenu || app.sidebarPeek)) {
       return act(() => {
-        app.overlay = null;
-        app.menu = null;
-        app.termMenu = null;
+        if (app.overlay || app.menu || app.termMenu) {
+          app.overlay = null;
+          app.menu = null;
+          app.termMenu = null;
+        } else {
+          app.sidebarPeek = false;
+        }
         terminals.focusActive();
       });
     }
+  }
+
+  // Auto-hide: the sidebar slides out when the pointer rests on the left
+  // edge, and goes away shortly after the pointer leaves it.
+  let docked = $derived(!app.sidebarAutoHide && !app.sidebarCollapsed);
+  let enterTimer: ReturnType<typeof setTimeout> | undefined;
+  let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+  function edgeEnter() {
+    clearTimeout(enterTimer);
+    enterTimer = setTimeout(() => (app.sidebarPeek = true), 120);
+  }
+  function edgeLeave() {
+    clearTimeout(enterTimer);
+  }
+  function peekEnter() {
+    clearTimeout(leaveTimer);
+  }
+  function peekLeave(e: PointerEvent) {
+    // Pointer capture (resizing) or a menu opened from the sidebar keeps it out.
+    if (e.buttons || app.menu || app.overlay) return;
+    clearTimeout(leaveTimer);
+    leaveTimer = setTimeout(() => {
+      if (app.menu || app.overlay) return;
+      app.sidebarPeek = false;
+    }, 350);
   }
 
   // Leaving overlays returns focus to the terminal.
@@ -115,6 +146,7 @@
       app.listMode = b.state.list_mode ?? "recent";
       app.sidebarWidth = b.state.sidebar_width || 280;
       app.sidebarCollapsed = !!b.state.sidebar_collapsed;
+      app.sidebarAutoHide = !!b.state.sidebar_auto_hide;
       app.fontZoom = b.state.font_zoom ?? 0;
       applyConfig(b.config, b.config_error);
       applySnapshot(b.snapshot);
@@ -137,10 +169,16 @@
 </script>
 
 <div class="shell" class:mac={app.platform === "macos"}>
-  {#if !app.sidebarCollapsed}
+  {#if docked}
     <Sidebar />
+  {:else if app.sidebarPeek}
+    <div class="peek" role="presentation" onpointerenter={peekEnter} onpointerleave={peekLeave}>
+      <Sidebar floating />
+    </div>
+  {:else if app.sidebarAutoHide}
+    <div class="edge" role="presentation" onpointerenter={edgeEnter} onpointerleave={edgeLeave}></div>
   {/if}
-  <main>
+  <main onpointerdown={() => !docked && app.sidebarPeek && (app.sidebarPeek = false)}>
     <Header />
     <TerminalPane />
   </main>
@@ -158,6 +196,8 @@
   <HookDialog host={app.overlay.host} install={app.overlay.install} />
 {:else if app.overlay?.kind === "confirm-quit"}
   <ConfirmQuit count={app.overlay.count} />
+{:else if app.overlay?.kind === "hosts"}
+  <HostsDialog />
 {/if}
 
 {#if app.menu}
@@ -173,10 +213,28 @@
 
 <style>
   .shell {
+    position: relative;
     display: flex;
     height: 100vh;
     width: 100vw;
     overflow: hidden;
+  }
+  .peek {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 40;
+    display: flex;
+  }
+  /* Invisible strip on the left edge that brings the sidebar out. */
+  .edge {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 6px;
+    z-index: 39;
   }
   main {
     flex: 1;

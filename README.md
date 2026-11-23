@@ -23,7 +23,7 @@ cd src-tauri && cargo test live -- --ignored --nocapture     # live check agains
 | `src-tauri/src/tmux.rs` | tmux snippets and output parsers |
 | `src-tauri/src/pty.rs` | PTYs; batched binary output with ack-based backpressure |
 | `src-tauri/src/hooks.rs` | Claude Code hook scripts and `settings.json` merge |
-| `src-tauri/src/sshconfig.rs` | `~/.ssh/config` parsing with `Include` |
+| `src-tauri/src/sshconfig.rs` | `~/.ssh/config` alias parsing with `Include`, for host suggestions |
 | `src-tauri/src/config.rs` | `config.toml` and `state.json` |
 | `src/lib/terminals.ts` | xterm.js instances, attach/reconnect, open-session cap, keys inside the terminal |
 | `src/lib/store.svelte.ts` | App state, attention rules, list ordering |

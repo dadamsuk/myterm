@@ -17,7 +17,7 @@ The primary workload is long-running Claude Code sessions started with `--rc '<n
 | Client platforms | Windows and macOS. Linux desktop is not a target |
 | Stack | Tauri 2 (Rust backend) + xterm.js (WebGL renderer) |
 | Transport | The system `ssh` binary, run in a local PTY. No SSH library |
-| Host list | Parsed from `~/.ssh/config`; that file is the only way to define hosts |
+| Host list | A list in `config.toml`, managed from the Hosts dialog or by hand; names are ssh destinations (usually `~/.ssh/config` aliases), which keeps the connection details |
 | Persistence on macOS/Linux hosts | tmux, one tmux session per destination |
 | Persistence on Windows hosts | None in v1: sessions are "ephemeral". A keeper mode is planned for v2 |
 | Local sessions | Yes; the local machine is just another host |
@@ -30,13 +30,13 @@ The primary workload is long-running Claude Code sessions started with `--rc '<n
 
 - Splits, panes, tabs or multiple visible terminals.
 - A custom wire protocol or a remote daemon on macOS/Linux hosts.
-- Managing SSH keys, passwords, or host definitions.
+- Managing SSH keys, passwords, or connection details (HostName, User, ...); those stay in `~/.ssh/config`.
 - Replacing tmux for people attaching from a plain terminal; sessions stay ordinary tmux sessions.
 - Linux desktop client support.
 
 ## 4. Concepts
 
-**Host.** One entry from `~/.ssh/config`, or the local machine. Each host has a detected kind:
+**Host.** One entry in the host list (section 9): an ssh destination, usually an alias from `~/.ssh/config`, or the local machine. Each host has a detected kind:
 
 - `tmux` — macOS or Linux with tmux 3.2 or newer. Sessions persist and are discoverable.
 - `ephemeral` — Windows (remote or local). Sessions exist only while the app holds them open.
@@ -165,6 +165,7 @@ Slug rules: lower-cased display name, anything outside `[a-z0-9_-]` replaced by 
 ### 6.1 Layout
 
 - **Sidebar (left, resizable, collapsible):** the session list with a three-way toggle at the top.
+  - **Auto-hide mode** (toolbar button or palette): the sidebar is hidden and the terminal takes the full width. Resting the pointer on the left edge of the window, or pressing Ctrl+Alt+B, slides it out over the terminal; it goes away when the pointer leaves it, a row is chosen, the terminal is clicked, or Esc / Ctrl+Alt+B is pressed. Ctrl+Alt+B also brings out a collapsed sidebar the same way. The mode is remembered.
 - **Header (thin, above the terminal):** display name, host, folder, state, connection status.
 - **Terminal (rest of the window):** one session at a time.
 
@@ -180,7 +181,7 @@ Toggle modes:
 | Name | Flat, alphabetical |
 | Recent | Flat, most recently used first (default) |
 
-In every mode, sessions that need attention are pinned in a "Needs you" section at the top. This pinning can be turned off.
+In every mode, sessions that need attention stay where they are in the list and are highlighted: an orange bar and tint for a permission wait, green for finished-but-unseen. Setting `pin_attention = true` also moves them into a "Needs you" section at the top.
 
 Right-click on a row: rename, kill (immediate, no confirmation), copy the manual `ssh … tmux attach` command. Rename runs `tmux rename-window` on the host, so the name is tmux's own and shows in its status bar too. Kill runs `kill-window`; killing a session's last window ends the session.
 
@@ -196,9 +197,9 @@ Everything doable with the mouse is available here:
 - New shell session…
 - Rename session / Kill session
 - Group by machine / Sort by name / Sort by recent
-- Reconnect host / Hide host / Show hidden hosts
+- Hosts… (the Hosts dialog) / Connect host / Reconnect host / Remove host from the list
 - Install attention hooks on host…
-- Toggle sidebar / Open settings file
+- Toggle sidebar / Toggle sidebar auto-hide / Show sidebar / Open settings file
 
 ### 6.5 New-session flow
 
@@ -221,6 +222,8 @@ The form has a Claude / Shell choice (Alt+C / Alt+S). Shell runs nothing. The ch
 | Ctrl+Shift+O | Quick switcher |
 | Ctrl+Shift+P | Command palette |
 | Ctrl+Shift+N | New Claude session |
+| Ctrl+Shift+B | Collapse or dock the sidebar (in auto-hide mode: show or hide it) |
+| Ctrl+Alt+B | Bring out the hidden sidebar over the terminal, or put it away |
 | Ctrl+Shift+C / Ctrl+Shift+V | Copy / paste (Cmd+C / Cmd+V on macOS) |
 | Shift+Enter | Sends ESC + CR, which Claude Code reads as "newline" |
 
@@ -231,6 +234,11 @@ On macOS, Cmd+Shift is accepted as an alternative to Ctrl+Shift. Every other key
 - xterm.js with the WebGL renderer, falling back to the DOM renderer if WebGL is unavailable.
 - Addons: fit, unicode11, web-links, clipboard (OSC 52).
 - Truecolor, mouse reporting, bracketed paste, clickable URLs.
+- Images and files for programs on the host (e.g. Claude Code, which accepts an image path in its prompt):
+  - Paste with no text on the clipboard but an image: the image is saved as PNG and its path is pasted.
+  - Dropping files onto the terminal pastes their paths.
+  - For remote hosts the file is first uploaded through the host channel (base64 in a heredoc, up to 50 MB) into `${TMPDIR:-/tmp}/myterm-<uid>/` (mode 700); locally it goes to the OS temp dir under `myterm/`. Files older than a day are removed on the next upload.
+  - Remote hosts without a `/bin/sh` channel (Windows over ssh) can't receive uploads; the app shows an error.
 - PTY output is delivered to the frontend as binary over Tauri channels, batched per frame, with acknowledgement-based backpressure so a flood of output cannot freeze the UI.
 - Resize is debounced and propagated to the PTY; tmux follows the most recently active client's size.
 - Selection: with tmux mouse mode on, dragging selects in tmux and copies through OSC 52. Shift+drag does a native selection.
@@ -244,7 +252,7 @@ On macOS, Cmd+Shift is accepted as an alternative to Ctrl+Shift. Every other key
 | State | Meaning | Shown as |
 |---|---|---|
 | `working` | Claude is running a turn | Subtle animated dot |
-| `permission` | Claude is blocked on a permission prompt | Strong badge; pinned to "Needs you" |
+| `permission` | Claude is blocked on a permission prompt | Strong badge; row highlighted in place |
 | `done` | Claude finished its turn and is waiting for me | Badge until I view the session, then cleared |
 | none | Plain shell, or hooks not installed | No dot |
 
@@ -283,21 +291,35 @@ Optional OS notification when a session I am not looking at enters `permission`.
 
 On Windows there is no tmux to hold the state. The hook script variant writes a small state file under `%USERPROFILE%\.myterm\state\`, keyed by a session id the app passes in an environment variable at launch, and the host channel reads that folder. This is the last milestone and may slip to v1.1.
 
-## 9. Host discovery
+## 9. Hosts
 
-- Parse `~/.ssh/config`, following `Include` directives and globs.
-- Every `Host` pattern without wildcards (`*`, `?`, `!`) becomes a host. `Match` blocks are ignored for discovery; ssh still applies them when connecting.
-- A `Host` block that contains the comment line `# myterm: ignore` is left out entirely: none of that line's aliases are listed or connected to. ssh ignores the comment. The marker only applies to the block it appears in, so it must come after the `Host` line.
-- Hosts can be hidden from the app. Hidden hosts are not connected to.
-- The local machine appears as `local`. A setting names the ssh alias that refers to this machine, so it is not listed twice.
-- The config file is watched and re-parsed on change.
+- The hosts shown, and their order, are a list in `config.toml`, one `[[host]]` table each:
+
+  ```toml
+  [[host]]
+  name = "local"
+  auto_connect = true
+
+  [[host]]
+  name = "intra"        # an alias from ~/.ssh/config
+  auto_connect = false
+  ```
+
+- `name` is passed to `ssh` as the destination, so it is normally a `~/.ssh/config` alias (HostName, User, keys and so on stay there), but `user@server` works too. `local` is this machine.
+- **Order** is the order of the list: Machine mode groups by it, and the Hosts panel follows it.
+- **auto_connect** (default true): the host channel connects when the app starts. When false the host is listed as "not connected" and connects the first time it is clicked (host heading, Hosts panel, or the palette's "Connect host"); after that it behaves like any other host until the app quits.
+- **The Hosts dialog** (host button in the sidebar toolbar, "Add, order and auto-connect…" in the Hosts panel, or "Hosts…" in the palette) edits this list: add a host by typing a name, with the `~/.ssh/config` aliases offered as suggestions; drag or use the arrows to reorder; toggle auto-connect; remove. Every change is written straight to `config.toml`, keeping the rest of the file, so hand edits and the dialog can be mixed.
+- Removing a host only takes it off the list: no connection is made to it. Its tmux sessions are not touched.
+- Aliases for suggestions come from `~/.ssh/config`, following `Include` directives and globs. Every `Host` pattern without wildcards (`*`, `?`, `!`) is offered.
+- **First run / upgrade:** when `config.toml` has no host list yet, one is built from `~/.ssh/config`: `local` first, then every alias in file order, leaving out the `local_alias`, any old `hidden_hosts` entries, and blocks carrying the old `# myterm: ignore` marker. It is written to `config.toml` and the old `hidden_hosts` key is removed; from then on the ssh config no longer decides which hosts are shown, and the markers can be deleted.
+- `config.toml` is watched and applied on change.
 
 ## 10. Local storage
 
 | File | Contents | Edited by |
 |---|---|---|
-| `config.toml` | Font, theme, key bindings, hidden hosts, per-host overrides (tmux path, mouse mode), `hide_tmux_status`, open-session cap (default 8), pinning and notification switches | Me |
-| `state.json` | Last-viewed times, known folders per host, cached host kind and tmux path, window geometry, list mode | The app |
+| `config.toml` | Font, theme, key bindings, the host list (order, auto-connect), per-host overrides (tmux path, mouse mode), `hide_tmux_status`, open-session cap (default 8), pinning and notification switches | Me |
+| `state.json` | Last-viewed times, known folders per host, cached host kind and tmux path, window geometry, list mode, sidebar width / collapsed / auto-hide | The app |
 
 Location: `%APPDATA%\myterm\` on Windows, `~/Library/Application Support/myterm/` on macOS. No credentials are stored.
 

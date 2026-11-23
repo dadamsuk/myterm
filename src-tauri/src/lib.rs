@@ -1,5 +1,6 @@
 mod channel;
 mod config;
+mod files;
 mod hooks;
 mod hosts;
 #[cfg(test)]
@@ -163,6 +164,16 @@ async fn complete_path(app: State<'_, Arc<App>>, host: String, prefix: String) -
 }
 
 #[tauri::command]
+async fn paste_image(app: State<'_, Arc<App>>, host: String) -> R<Option<String>> {
+    app.paste_image(&host).await.map_err(err)
+}
+
+#[tauri::command]
+async fn drop_files(app: State<'_, Arc<App>>, host: String, paths: Vec<String>) -> R<Vec<String>> {
+    app.drop_files(&host, &paths).await.map_err(err)
+}
+
+#[tauri::command]
 fn attach_command_text(app: State<Arc<App>>, host: String, slug: String) -> R<String> {
     app.attach_command_text(&host, &slug).map_err(err)
 }
@@ -173,10 +184,15 @@ async fn reconnect_host(app: State<'_, Arc<App>>, host: String) -> R<()> {
 }
 
 #[tauri::command]
-fn set_host_hidden(app: State<Arc<App>>, host: String, hidden: bool) -> R<()> {
-    config::set_host_hidden(&host, hidden).map_err(err)?;
+fn set_hosts(app: State<Arc<App>>, hosts: Vec<config::HostEntry>) -> R<()> {
+    app.inner().set_hosts(hosts).map_err(err)?;
     reload_config(app.inner());
     Ok(())
+}
+
+#[tauri::command]
+fn ssh_aliases(app: State<Arc<App>>) -> Vec<String> {
+    app.ssh_aliases()
 }
 
 #[tauri::command]
@@ -201,6 +217,7 @@ fn set_ui_state(
     list_mode: Option<String>,
     sidebar_width: Option<f64>,
     sidebar_collapsed: Option<bool>,
+    sidebar_auto_hide: Option<bool>,
     font_zoom: Option<i32>,
 ) {
     let mut st = app.state.lock().unwrap();
@@ -212,6 +229,9 @@ fn set_ui_state(
     }
     if let Some(c) = sidebar_collapsed {
         st.sidebar_collapsed = c;
+    }
+    if let Some(a) = sidebar_auto_hide {
+        st.sidebar_auto_hide = a;
     }
     if let Some(z) = font_zoom {
         st.font_zoom = z;
@@ -442,8 +462,11 @@ pub fn run() {
             kill_window,
             complete_path,
             attach_command_text,
+            paste_image,
+            drop_files,
             reconnect_host,
-            set_host_hidden,
+            set_hosts,
+            ssh_aliases,
             hooks_plan,
             hooks_apply,
             mark_viewed,

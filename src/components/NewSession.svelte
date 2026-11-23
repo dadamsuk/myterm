@@ -7,7 +7,7 @@
 
   let { initialKind, presetHost }: { initialKind?: "claude" | "shell"; presetHost?: string } = $props();
 
-  const usable = (h: HostInfo) => !h.hidden && ((h.kind === "tmux" && h.connected) || h.kind === "ephemeral");
+  const usable = (h: HostInfo) => ((h.kind === "tmux" && h.connected) || h.kind === "ephemeral");
   const hosts = app.hosts.filter(usable);
   // Opened from a host heading: only that host's folders are offered. The
   // dialog is created fresh each time, so reading the prop once is intended.
