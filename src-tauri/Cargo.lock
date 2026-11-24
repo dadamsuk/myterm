@@ -2436,6 +2436,7 @@ dependencies = [
  "dirs 6.0.0",
  "glob",
  "notify",
+ "png",
  "portable-pty",
  "serde",
  "serde_json",

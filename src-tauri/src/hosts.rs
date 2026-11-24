@@ -35,7 +35,10 @@ pub struct HostInfo {
     pub home: Option<String>,
     /// Remote login name, from the bootstrap.
     pub user: Option<String>,
-    pub hidden: bool,
+    /// From the host list: connect when the app starts.
+    pub auto_connect: bool,
+    /// Not connected yet because auto_connect is off; a click connects.
+    pub dormant: bool,
     pub local: bool,
     pub win_powershell: bool,
     pub hooks_installed: bool,
@@ -49,6 +52,9 @@ pub struct Host {
     pub sessions: Mutex<Vec<Session>>,
     pub wake: Notify,
     pub removed: AtomicBool,
+    /// False until the host should connect: at start for auto_connect hosts,
+    /// otherwise on the first reconnect (a click).
+    pub activated: AtomicBool,
 }
 
 #[derive(Clone, Debug)]
@@ -160,19 +166,52 @@ impl App {
             .ok_or_else(|| anyhow!("unknown host {alias}"))
     }
 
-    /// Re-reads ~/.ssh/config and the hidden list; starts or stops host tasks.
-    pub fn sync_hosts(self: &Arc<Self>) -> Vec<std::path::PathBuf> {
-        let parsed = sshconfig::parse();
+    /// The host list from config.toml. On first run it is built from
+    /// ~/.ssh/config (honouring the old `hidden_hosts` and `# myterm: ignore`)
+    /// and written back, so from then on config.toml alone decides.
+    fn host_list(&self) -> Vec<config::HostEntry> {
         let cfg = self.cfg();
-        let mut wanted = vec![LOCAL.to_string()];
-        for h in parsed.hosts {
-            if Some(&h) != cfg.local_alias.as_ref() && h != LOCAL {
-                wanted.push(h);
-            }
+        if let Some(list) = cfg.host_list {
+            return config::clean_hosts(list);
         }
+        let parsed = sshconfig::parse();
+        let mut list = vec![config::HostEntry { name: LOCAL.into(), auto_connect: true }];
+        for h in parsed.hosts {
+            if h == LOCAL || Some(&h) == cfg.local_alias.as_ref() || cfg.hidden_hosts.contains(&h) || parsed.ignored.contains(&h) {
+                continue;
+            }
+            list.push(config::HostEntry { name: h, auto_connect: true });
+        }
+        let list = config::clean_hosts(list);
+        if config::write_hosts(&list).is_ok() {
+            let mut c = self.config.write().unwrap();
+            c.host_list = Some(list.clone());
+            c.hidden_hosts.clear();
+        }
+        list
+    }
+
+    /// Replaces the host list (from the Hosts dialog) and applies it.
+    pub fn set_hosts(self: &Arc<Self>, list: Vec<config::HostEntry>) -> Result<()> {
+        let list = config::clean_hosts(list);
+        config::write_hosts(&list)?;
+        self.config.write().unwrap().host_list = Some(list);
+        self.sync_hosts();
+        Ok(())
+    }
+
+    /// Aliases in ~/.ssh/config, for suggestions when adding a host.
+    pub fn ssh_aliases(&self) -> Vec<String> {
+        sshconfig::parse().hosts
+    }
+
+    /// Applies the host list: starts, stops and reorders host tasks.
+    /// Returns the ssh config files, for the watcher.
+    pub fn sync_hosts(self: &Arc<Self>) -> Vec<std::path::PathBuf> {
+        let list = self.host_list();
         let mut hosts = self.hosts.lock().unwrap();
         hosts.retain(|h| {
-            let keep = wanted.contains(&h.alias);
+            let keep = list.iter().any(|e| e.name == h.alias);
             if !keep {
                 h.removed.store(true, Ordering::SeqCst);
                 if let Some(c) = h.channel.lock().unwrap().take() {
@@ -183,21 +222,17 @@ impl App {
             keep
         });
         let mut ordered = vec![];
-        for alias in &wanted {
-            let hidden = cfg.hidden_hosts.contains(alias);
+        let mut starting = 0u64;
+        for e in &list {
+            let alias = &e.name;
             if let Some(h) = hosts.iter().find(|h| &h.alias == alias) {
-                let changed = {
+                let wake = {
                     let mut i = h.info.lock().unwrap();
-                    let c = i.hidden != hidden;
-                    i.hidden = hidden;
-                    c
+                    i.auto_connect = e.auto_connect;
+                    // Turning auto-connect on also connects now.
+                    e.auto_connect && !h.activated.swap(true, Ordering::SeqCst)
                 };
-                if changed {
-                    if hidden {
-                        if let Some(c) = h.channel.lock().unwrap().take() {
-                            c.kill();
-                        }
-                    }
+                if wake {
                     h.wake.notify_one();
                 }
                 ordered.push(h.clone());
@@ -210,9 +245,10 @@ impl App {
                 info: Mutex::new(HostInfo {
                     alias: alias.clone(),
                     kind: "unavailable".into(),
-                    connecting: !hidden,
-                    status: if hidden { "hidden".into() } else { "connecting".into() },
-                    hidden,
+                    connecting: e.auto_connect,
+                    status: if e.auto_connect { "connecting".into() } else { "not connected".into() },
+                    auto_connect: e.auto_connect,
+                    dormant: !e.auto_connect,
                     local: is_local,
                     user: if is_local { std::env::var("USERNAME").or_else(|_| std::env::var("USER")).ok() } else { None },
                     ..Default::default()
@@ -221,11 +257,15 @@ impl App {
                 sessions: Mutex::new(vec![]),
                 wake: Notify::new(),
                 removed: AtomicBool::new(false),
+                activated: AtomicBool::new(e.auto_connect),
             });
             let app = self.clone();
             let hh = h.clone();
             // Stagger first connections so a dozen ssh handshakes don't start at once.
-            let delay = Duration::from_millis(200 * ordered.len() as u64);
+            let delay = Duration::from_millis(200 * starting);
+            if e.auto_connect {
+                starting += 1;
+            }
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(delay).await;
                 host_task(app, hh).await
@@ -235,7 +275,7 @@ impl App {
         *hosts = ordered;
         drop(hosts);
         self.emit_snapshot();
-        parsed.files
+        sshconfig::parse().files
     }
 
     fn set_info(&self, h: &Host, f: impl FnOnce(&mut HostInfo)) {
@@ -570,8 +610,10 @@ impl App {
         self.ephemerals.lock().unwrap().iter().filter(|e| !e.ended).count()
     }
 
+    /// Connects a host that is not connected yet, or reconnects it.
     pub async fn reconnect(&self, host: &str) -> Result<()> {
         let h = self.host(host)?;
+        h.activated.store(true, Ordering::SeqCst);
         if let Some(c) = h.channel.lock().unwrap().take() {
             c.kill();
         }
@@ -859,15 +901,17 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
         if h.removed.load(Ordering::SeqCst) {
             return;
         }
-        if h.info.lock().unwrap().hidden {
+        if !h.activated.load(Ordering::SeqCst) {
             app.set_info(&h, |i| {
                 i.connected = false;
                 i.connecting = false;
-                i.status = "hidden".into();
+                i.dormant = true;
+                i.status = "not connected".into();
             });
             h.wake.notified().await;
             continue;
         }
+        app.set_info(&h, |i| i.dormant = false);
         if h.is_local && local_is_windows() {
             app.set_info(&h, |i| {
                 i.kind = "ephemeral".into();
@@ -951,7 +995,7 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
                             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                             _ = h.wake.notified() => {}
                         }
-                        if ch.is_dead() || h.removed.load(Ordering::SeqCst) || h.info.lock().unwrap().hidden {
+                        if ch.is_dead() || h.removed.load(Ordering::SeqCst) {
                             break;
                         }
                     }

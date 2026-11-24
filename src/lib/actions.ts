@@ -1,11 +1,12 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { api, type HostInfo, type Session, type Window } from "./api";
-import { app, hostInfo, isReachable, setSidebar, toast, windowTarget, type Row } from "./store.svelte";
+import { api, type HostEntry, type HostInfo, type Session, type Window } from "./api";
+import { app, hostInfo, isReachable, setSidebar, setSidebarAutoHide, toast, windowTarget, type Row } from "./store.svelte";
 import { terminals } from "./terminals";
 
 export function activate(s: Session) {
   app.overlay = null;
   app.menu = null;
+  app.sidebarPeek = false;
   if (!s.persistent && !terminals.has(s.key)) {
     toast("This ephemeral session is not open in this window", true);
     return;
@@ -151,21 +152,32 @@ export function hostAction(h: HostInfo) {
 }
 
 export async function reconnectHost(alias: string) {
+  const dormant = hostInfo(alias)?.dormant;
   try {
     await api.reconnectHost(alias);
-    toast(`Reconnecting ${alias}`);
+    toast(`${dormant ? "Connecting" : "Reconnecting"} ${alias}`);
   } catch (e) {
     toast(String(e), true);
   }
 }
 
-export async function setHostHidden(alias: string, hidden: boolean) {
+/** The host list as config.toml has it, in sidebar order. */
+export function hostEntries(): HostEntry[] {
+  return app.hosts.map((h) => ({ name: h.alias, auto_connect: h.auto_connect }));
+}
+
+export async function saveHosts(list: HostEntry[]) {
   try {
-    await api.setHostHidden(alias, hidden);
-    toast(hidden ? `Hid ${alias}` : `Showing ${alias}`);
+    await api.setHosts(list);
   } catch (e) {
     toast(String(e), true);
   }
+}
+
+/** Takes a host out of the list; its sessions on the host are not touched. */
+export async function removeHost(alias: string) {
+  await saveHosts(hostEntries().filter((h) => h.name !== alias));
+  toast(`Removed ${alias} from the list`);
 }
 
 export async function openSettings() {
@@ -176,18 +188,45 @@ export async function openSettings() {
   }
 }
 
-/** Hosts come from ~/.ssh/config; adding one means editing it. */
-export async function addHost() {
+export function manageHosts() {
+  app.sidebarPeek = false;
+  app.overlay = { kind: "hosts" };
+}
+
+export async function openSshConfig() {
   try {
     await api.openSshConfig();
-    toast("Add a Host block to your ssh config; myterm picks it up when you save");
   } catch (e) {
     toast(String(e), true);
   }
 }
 
+/** In auto-hide mode this shows or hides the sidebar over the terminal;
+ *  otherwise it docks or collapses it. */
 export function toggleSidebar() {
+  if (app.sidebarAutoHide) {
+    app.sidebarPeek = !app.sidebarPeek;
+    return;
+  }
+  app.sidebarPeek = false;
   setSidebar(!app.sidebarCollapsed);
+  setTimeout(() => terminals.fitActive(), 50);
+}
+
+/** Brings the sidebar out over the terminal when it is hidden (auto-hide or
+ *  collapsed); hides it again on a second press. */
+export function peekSidebar() {
+  if (!app.sidebarAutoHide && !app.sidebarCollapsed) return toggleSidebar();
+  app.sidebarPeek = !app.sidebarPeek;
+  if (!app.sidebarPeek) terminals.focusActive();
+}
+
+export function toggleAutoHide() {
+  const on = !app.sidebarAutoHide;
+  setSidebarAutoHide(on);
+  // Auto-hide replaces collapsing; turning it off shows the sidebar docked.
+  if (!on && app.sidebarCollapsed) setSidebar(false);
+  toast(on ? `Sidebar auto-hides: point at the left edge or press ${app.config?.keys.peek_sidebar ?? "Ctrl+Alt+B"}` : "Sidebar stays open");
   setTimeout(() => terminals.fitActive(), 50);
 }
 

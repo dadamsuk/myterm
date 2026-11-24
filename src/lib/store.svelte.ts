@@ -8,6 +8,7 @@ export type Overlay =
   | { kind: "rename"; row: Row }
   | { kind: "hooks"; host: string; install: boolean }
   | { kind: "confirm-quit"; count: number }
+  | { kind: "hosts" }
   | null;
 
 export interface TermStatus {
@@ -27,6 +28,10 @@ export const app = $state({
   listMode: "recent" as ListMode,
   sidebarWidth: 280,
   sidebarCollapsed: false,
+  /** The sidebar is hidden and slides over the terminal on demand. */
+  sidebarAutoHide: false,
+  /** The sidebar is showing over the terminal (auto-hide or collapsed). */
+  sidebarPeek: false,
   /** Points added to the configured font size (Ctrl+= / Ctrl+-). */
   fontZoom: 0,
   /** Key of the terminal on screen: a session key, or "login:<host>". */
@@ -59,8 +64,8 @@ export function sessionByKey(key: string | null): Session | undefined {
 }
 
 export function visibleSessions(): Session[] {
-  const hidden = new Set(app.hosts.filter((h) => h.hidden).map((h) => h.alias));
-  return app.sessions.filter((s) => !hidden.has(s.host));
+  const listed = new Set(app.hosts.map((h) => h.alias));
+  return app.sessions.filter((s) => listed.has(s.host));
 }
 
 export function lastUsed(s: Session): number {
@@ -123,7 +128,25 @@ export function rowDot(r: Row): string {
   if (st === "permission") return "permission";
   if (st === "done" && rowNeedsAttention(r)) return "done";
   if (st === "working") return "working";
-  return "none";
+  // Any other Claude window: a quiet ring, so Claude rows stand out from shells.
+  return rowKind(r) === "claude" ? "idle" : "none";
+}
+
+const rowKind = (r: Row) => (r.w ? r.w.kind : r.s.kind);
+
+/** Words for a row's status, for hover text. */
+export function rowStatusText(r: Row): string {
+  if (rowKind(r) !== "claude") return "";
+  switch (rowDot(r)) {
+    case "permission":
+      return "Claude: waiting for permission";
+    case "working":
+      return "Claude: working";
+    case "done":
+      return "Claude: finished (not seen yet)";
+    default:
+      return "Claude: idle";
+  }
 }
 
 /** A window's own last-viewed time; the current window also counts tmux's
@@ -176,14 +199,13 @@ export interface Group {
 
 export function groupedRows(): Group[] {
   const all = visibleRows();
-  const pinned = app.config?.pin_attention !== false ? all.filter(rowNeedsAttention) : [];
+  const pinned = app.config?.pin_attention === true ? all.filter(rowNeedsAttention) : [];
   const pinnedKeys = new Set(pinned.map((r) => r.key));
   const rest = all.filter((r) => !pinnedKeys.has(r.key));
   const groups: Group[] = [];
   if (pinned.length) groups.push({ title: "Needs you", rows: pinned.sort(byAttention) });
   if (app.listMode === "machine") {
     for (const h of app.hosts) {
-      if (h.hidden) continue;
       groups.push({ title: h.alias, host: h, rows: rest.filter((r) => r.s.host === h.alias).sort(byTmuxOrder) });
     }
   } else if (app.listMode === "name") {
@@ -202,9 +224,10 @@ export function sidebarRows(): Row[] {
 /** Hover text for a row: name, then user@host and the folder. */
 export function rowTooltip(r: Row): string {
   const user = app.hosts.find((h) => h.alias === r.s.host)?.user;
-  return `${rowName(r)}
-${user ? user + "@" : ""}${r.s.host}
-${rowCwd(r)}`;
+  const status = rowStatusText(r);
+  const lines = [rowName(r), `${user ? user + "@" : ""}${r.s.host}`, rowCwd(r)];
+  if (status) lines.push(status);
+  return lines.join("\n");
 }
 
 /** Switcher order for an empty query: attention, then recent; current last. */
@@ -246,6 +269,12 @@ export function setListMode(m: ListMode) {
   api.setUiState({ listMode: m }).catch(() => {});
 }
 
+export function setSidebarAutoHide(on: boolean) {
+  app.sidebarAutoHide = on;
+  app.sidebarPeek = false;
+  api.setUiState({ sidebarAutoHide: on }).catch(() => {});
+}
+
 export function setSidebar(collapsed: boolean, width?: number) {
   app.sidebarCollapsed = collapsed;
   if (width !== undefined) app.sidebarWidth = width;
@@ -266,13 +295,13 @@ export interface FolderEntry {
 /** Every folder seen across hosts; one entry per (host, path), newest first. */
 export function knownFolders(): FolderEntry[] {
   const out: FolderEntry[] = [];
-  const hidden = new Set(app.hosts.filter((h) => h.hidden).map((h) => h.alias));
+  const listed = new Set(app.hosts.map((h) => h.alias));
   for (const [host, m] of Object.entries(app.knownFolders)) {
-    if (hidden.has(host) || !app.hosts.some((h) => h.alias === host)) continue;
+    if (!listed.has(host)) continue;
     for (const [path, t] of Object.entries(m)) out.push({ host, path, t });
   }
   for (const s of app.sessions) {
-    if (s.cwd && !out.some((f) => f.host === s.host && f.path === s.cwd) && !hidden.has(s.host))
+    if (s.cwd && !out.some((f) => f.host === s.host && f.path === s.cwd) && listed.has(s.host))
       out.push({ host: s.host, path: s.cwd, t: lastUsed(s) });
   }
   return out.sort((a, b) => b.t - a.t);

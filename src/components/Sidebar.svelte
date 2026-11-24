@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { HostInfo, ListMode } from "../lib/api";
+  import type { ListMode } from "../lib/api";
   import {
     app,
     basename,
@@ -12,13 +12,17 @@
     rowDot,
     rowLastUsed,
     rowName,
+    rowNeedsAttention,
     rowOnScreen,
     rowTooltip,
     setListMode,
     setSidebar,
     type Row,
   } from "../lib/store.svelte";
-  import { activateRow, addHost, hostAction, openSettings, setHostHidden, toggleSidebar } from "../lib/actions";
+  import { activateRow, hostAction, manageHosts, openSettings, removeHost, toggleAutoHide, toggleSidebar } from "../lib/actions";
+  import { hostColor, hostStatus } from "../lib/hostdot";
+
+  let { floating = false }: { floating?: boolean } = $props();
   import { label } from "../lib/keys";
   import { terminals } from "../lib/terminals";
 
@@ -42,14 +46,6 @@
     { id: "recent", label: "Recent" },
   ];
 
-  function hostDot(h: HostInfo): string {
-    if (h.connecting) return "var(--fg-faint)";
-    if (h.kind === "tmux" && h.connected) return "var(--green)";
-    if (h.kind === "ephemeral") return "var(--accent)";
-    if (h.needs_login) return "var(--yellow)";
-    return "var(--red)";
-  }
-
   function onMenu(e: MouseEvent, r: Row) {
     e.preventDefault();
     app.menu = { x: e.clientX, y: e.clientY, row: r };
@@ -72,16 +68,15 @@
     terminals.fitActive();
   }
 
-  let problemHosts = $derived(app.hosts.filter((h) => !h.hidden));
   let hostsOpen = $state(false);
 </script>
 
-<aside style="width: {app.sidebarWidth}px">
+<aside class:floating style="width: {app.sidebarWidth}px">
   <div class="tools">
     <button title="New session{hint(keys?.new_session)}" aria-label="New session" onclick={() => (app.overlay = { kind: "new" })}>
       <svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" /></svg>
     </button>
-    <button title="Add a host (opens your ssh config)" aria-label="Add host" onclick={addHost}>
+    <button title="Hosts: add, order, auto-connect" aria-label="Hosts" onclick={manageHosts}>
       <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="10" height="4" rx="1" /><rect x="1.5" y="9.5" width="10" height="4" rx="1" /><path d="M13.5 9v5M11 11.5h5" /></svg>
     </button>
     <button title="Switch session{hint(keys?.switcher)}" aria-label="Switch session" onclick={() => (app.overlay = { kind: "switcher" })}>
@@ -91,11 +86,25 @@
       <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></svg>
     </button>
     <button title="Settings (opens config.toml)" aria-label="Settings" onclick={openSettings}>
-      <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" /><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" /></svg>
+      <svg viewBox="0 0 16 16"><path d="M6.9 1.5h2.2l.4 1.8 1.2.5 1.6-1 1.5 1.5-1 1.6.5 1.2 1.8.4v2.2l-1.8.4-.5 1.2 1 1.6-1.5 1.5-1.6-1-1.2.5-.4 1.8H6.9l-.4-1.8-1.2-.5-1.6 1-1.5-1.5 1-1.6-.5-1.2-1.8-.4V6.9l1.8-.4.5-1.2-1-1.6 1.5-1.5 1.6 1 1.2-.5z" /><circle cx="8" cy="8" r="2.1" /></svg>
     </button>
-    <button class="collapse" title="Hide sidebar{hint(keys?.toggle_sidebar)}" aria-label="Hide sidebar" onclick={toggleSidebar}>
-      <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" /><path d="M6 2.5v11M11 6 9 8l2 2" /></svg>
+    <button
+      class="collapse"
+      class:on={app.sidebarAutoHide}
+      title={app.sidebarAutoHide
+        ? "Keep the sidebar open"
+        : `Auto-hide the sidebar: it comes back when you point at the left edge${hint(keys?.peek_sidebar)}`}
+      aria-label="Auto-hide sidebar"
+      aria-pressed={app.sidebarAutoHide}
+      onclick={toggleAutoHide}
+    >
+      <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" /><path d="M6 2.5v11" stroke-dasharray={app.sidebarAutoHide ? "none" : "1.6 1.6"} /><path d="M3 6h1.2M3 8h1.2M3 10h1.2" /></svg>
     </button>
+    {#if !app.sidebarAutoHide}
+      <button title="Hide sidebar{hint(keys?.toggle_sidebar)}" aria-label="Hide sidebar" onclick={toggleSidebar}>
+        <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" /><path d="M6 2.5v11M11 6 9 8l2 2" /></svg>
+      </button>
+    {/if}
   </div>
   <div class="modes" role="tablist">
     {#each modes as m}
@@ -110,12 +119,12 @@
       {#if g.title}
         <div class="group" class:attention={g.title === "Needs you" && !g.host}>
           {#if g.host}
-            <span class="hdot" style="background: {hostDot(g.host)}"></span>
+            <span class="hdot {hostColor(g.host)}"></span>
           {/if}
           <span class="gtitle">{g.title}</span>
           {#if g.host && !(g.host.kind === "tmux" && g.host.connected)}
             <button class="hstatus" title={g.host.status} onclick={() => g.host && hostAction(g.host)}>
-              {g.host.needs_login ? "log in" : g.host.kind === "ephemeral" ? "ephemeral" : g.host.status}
+              {g.host.dormant ? "connect" : g.host.needs_login ? "log in" : g.host.kind === "ephemeral" ? "ephemeral" : g.host.status}
             </button>
           {/if}
           {#if g.host && ((g.host.kind === "tmux" && g.host.connected) || g.host.kind === "ephemeral")}
@@ -135,6 +144,8 @@
           class:active={rowOnScreen(r)}
           class:greyed={!isReachable(r.s)}
           class:eph={!r.s.persistent}
+          class:needs-permission={rowNeedsAttention(r) && rowDot(r) === "permission"}
+          class:needs-done={rowNeedsAttention(r) && rowDot(r) === "done"}
           onclick={() => activateRow(r)}
           oncontextmenu={(e) => onMenu(e, r)}
           title={rowTooltip(r)}
@@ -152,7 +163,7 @@
         </button>
       {/each}
       {#if g.host && g.rows.length === 0}
-        <div class="none-row faint">no sessions</div>
+        <div class="none-row faint">{g.host.dormant ? "not connected" : "no sessions"}</div>
       {/if}
     {/each}
     {#if groups.every((g) => g.rows.length === 0) && app.listMode !== "machine"}
@@ -166,23 +177,22 @@
     <button class="hosts-toggle" onclick={() => (hostsOpen = !hostsOpen)}>
       <span>Hosts</span>
       <span class="hsummary">
-        {#each problemHosts as h (h.alias)}
-          <span class="hdot" style="background: {hostDot(h)}" title="{h.alias}: {h.status}"></span>
+        {#each app.hosts as h (h.alias)}
+          <span class="hdot {hostColor(h)}" title="{h.alias}: {hostStatus(h)}"></span>
         {/each}
       </span>
     </button>
     {#if hostsOpen}
       <div class="hostlist">
-        {#each problemHosts as h (h.alias)}
+        {#each app.hosts as h (h.alias)}
           <div class="hrow">
-            <span class="hdot" style="background: {hostDot(h)}"></span>
-            <button class="hname" title="Click to {h.needs_login ? 'log in' : 'reconnect'}" onclick={() => hostAction(h)}>{h.alias}</button>
-            <span class="hst" title={h.status}>{h.needs_login ? "needs interactive login" : h.status}</span>
-            {#if !h.local}
-              <button class="hide" title="Hide host" onclick={() => setHostHidden(h.alias, true)}>×</button>
-            {/if}
+            <span class="hdot {hostColor(h)}"></span>
+            <button class="hname" title="Click to {h.dormant ? 'connect' : h.needs_login ? 'log in' : 'reconnect'}" onclick={() => hostAction(h)}>{h.alias}</button>
+            <span class="hst" title={h.status}>{hostStatus(h)}</span>
+            <button class="hide" title="Remove from the host list" onclick={() => removeHost(h.alias)}>×</button>
           </div>
         {/each}
+        <button class="manage" onclick={manageHosts}>Add, order and auto-connect…</button>
       </div>
     {/if}
   </div>
@@ -200,12 +210,29 @@
 <style>
   aside {
     position: relative;
+    height: 100%;
     flex-shrink: 0;
     background: var(--panel);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     min-width: 0;
+  }
+  /* Auto-hide: over the terminal rather than beside it. */
+  aside.floating {
+    box-shadow: 8px 0 28px rgba(0, 0, 0, 0.45);
+    animation: slide-in 0.12s ease-out;
+  }
+  @keyframes slide-in {
+    from {
+      transform: translateX(-24px);
+      opacity: 0.4;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    aside.floating {
+      animation: none;
+    }
   }
   .tools {
     display: flex;
@@ -227,6 +254,9 @@
   }
   .tools .collapse {
     margin-left: auto;
+  }
+  .tools button.on {
+    color: var(--accent);
   }
   .tools svg {
     width: 15px;
@@ -287,7 +317,7 @@
     color: var(--fg-faint);
   }
   .group.attention .gtitle {
-    color: var(--orange);
+    color: var(--st-permission);
   }
   .gtitle {
     overflow: hidden;
@@ -347,6 +377,19 @@
   }
   .row.active {
     background: var(--selected);
+  }
+  /* Needs you: highlighted in place rather than moved. */
+  .row.needs-permission {
+    background: rgba(255, 138, 31, 0.14);
+    box-shadow: inset 3px 0 0 var(--st-permission);
+  }
+  .row.needs-done {
+    background: rgba(61, 220, 132, 0.1);
+    box-shadow: inset 3px 0 0 var(--st-done);
+  }
+  .row.needs-permission:hover,
+  .row.needs-done:hover {
+    filter: brightness(1.15);
   }
   .row.greyed {
     opacity: 0.45;
@@ -426,13 +469,6 @@
     flex-wrap: wrap;
     margin-left: auto;
   }
-  .hdot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    display: inline-block;
-  }
   .hostlist {
     max-height: 40vh;
     overflow-y: auto;
@@ -472,6 +508,18 @@
   }
   .hide:hover {
     color: var(--fg);
+  }
+  .manage {
+    display: block;
+    background: none;
+    border: 0;
+    color: var(--accent);
+    font-size: 12px;
+    padding: 4px 6px 2px;
+    cursor: pointer;
+  }
+  .manage:hover {
+    text-decoration: underline;
   }
   .resizer {
     position: absolute;

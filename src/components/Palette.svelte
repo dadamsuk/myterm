@@ -17,8 +17,11 @@
     copyAttachCommand,
     killRow,
     openSettings,
+    manageHosts,
+    peekSidebar,
     reconnectHost,
-    setHostHidden,
+    removeHost,
+    toggleAutoHide,
     toggleSidebar,
   } from "../lib/actions";
   import { terminals } from "../lib/terminals";
@@ -54,7 +57,7 @@
   }
 
   const done = () => (app.overlay = null);
-  const shown = () => app.hosts.filter((h) => !h.hidden);
+  const shown = () => app.hosts;
   const k = app.config?.keys;
   const mac = isMac();
 
@@ -84,14 +87,15 @@
     { label: "Group by machine", run: () => { setListMode("machine"); done(); } },
     { label: "Sort by name", run: () => { setListMode("name"); done(); } },
     { label: "Sort by recent", run: () => { setListMode("recent"); done(); } },
+    { label: "Connect host", detail: "hosts with auto-connect off", run: () => pickHost("Connect which host?", shown().filter((h) => h.dormant), (h) => { done(); reconnectHost(h.alias); }) },
     { label: "Reconnect host", run: () => pickHost("Reconnect which host?", shown(), (h) => { done(); reconnectHost(h.alias); }) },
     {
       label: "Log in to host…",
       detail: "interactive ssh, for hosts that need a passphrase or host-key confirmation",
       run: () => pickHost("Log in to which host?", shown().filter((h) => !h.local), (h) => { done(); terminals.openLogin(h.alias); }),
     },
-    { label: "Hide host", run: () => pickHost("Hide which host?", shown().filter((h) => !h.local), (h) => { done(); setHostHidden(h.alias, true); }) },
-    { label: "Show hidden hosts", run: () => pickHost("Show which host?", app.hosts.filter((h) => h.hidden), (h) => { done(); setHostHidden(h.alias, false); }) },
+    { label: "Hosts…", detail: "add, remove, order, auto-connect", run: manageHosts },
+    { label: "Remove host from the list", run: () => pickHost("Remove which host?", shown(), (h) => { done(); removeHost(h.alias); }) },
     {
       label: "Install attention hooks on host…",
       run: () =>
@@ -114,6 +118,8 @@
     { label: "Smaller font", keys: mac ? "Cmd+-" : "Ctrl+-", run: () => { done(); terminals.zoom(-1); } },
     { label: "Reset font size", keys: mac ? "Cmd+0" : "Ctrl+0", run: () => { done(); terminals.zoom(0); } },
     { label: "Toggle sidebar", keys: k && label(k.toggle_sidebar, mac), run: () => { done(); toggleSidebar(); } },
+    { label: "Toggle sidebar auto-hide", detail: "hidden until you point at the left edge", run: () => { done(); toggleAutoHide(); } },
+    { label: "Show sidebar", keys: k && label(k.peek_sidebar || "Ctrl+Alt+B", mac), run: () => { done(); peekSidebar(); } },
     { label: "Open settings file", run: () => { done(); openSettings(); } },
   ];
 </script>

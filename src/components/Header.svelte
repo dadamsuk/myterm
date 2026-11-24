@@ -101,7 +101,7 @@
     color: var(--fg-dim);
   }
   .state.permission {
-    color: var(--orange);
+    color: var(--st-permission);
   }
   .conn {
     margin-left: auto;

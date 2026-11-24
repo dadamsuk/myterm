@@ -1,4 +1,5 @@
-//! Host discovery from `~/.ssh/config` (section 9).
+//! Aliases from `~/.ssh/config`, offered when adding a host (section 9).
+//! Which hosts are shown is set in config.toml, not here.
 
 use std::path::{Path, PathBuf};
 
@@ -7,40 +8,30 @@ pub fn ssh_dir() -> PathBuf {
 }
 
 pub struct Parsed {
+    /// Every concrete alias, in file order.
     pub hosts: Vec<String>,
+    /// Aliases from `Host` blocks marked with the legacy `# myterm: ignore`;
+    /// only used when building the first host list.
+    pub ignored: Vec<String>,
     /// Every config file read, for the watcher.
     pub files: Vec<PathBuf>,
 }
 
-struct State {
-    p: Parsed,
-    /// Aliases from `Host` blocks marked with `# myterm: ignore`.
-    ignored: Vec<String>,
-}
-
-impl State {
-    fn new() -> Self {
-        State { p: Parsed { hosts: vec![], files: vec![] }, ignored: vec![] }
-    }
-
-    fn finish(mut self) -> Parsed {
-        let ignored = self.ignored;
-        self.p.hosts.retain(|h| !ignored.contains(h));
-        self.p
-    }
-}
+type State = Parsed;
 
 pub fn parse() -> Parsed {
-    let mut s = State::new();
+    let mut s = Parsed { hosts: vec![], ignored: vec![], files: vec![] };
     parse_file(&ssh_dir().join("config"), &mut s, 0);
-    s.finish()
+    s
 }
 
+/// Aliases without the ignored ones.
 #[cfg(test)]
 pub fn parse_str(text: &str) -> Vec<String> {
-    let mut s = State::new();
+    let mut s = Parsed { hosts: vec![], ignored: vec![], files: vec![] };
     parse_text(text, &mut s, 0);
-    s.finish().hosts
+    s.hosts.retain(|h| !s.ignored.contains(h));
+    s.hosts
 }
 
 /// True for a comment line such as `# myterm: ignore` or `#myterm ignore`.
@@ -54,10 +45,10 @@ fn is_ignore_marker(line: &str) -> bool {
 }
 
 fn parse_file(path: &Path, out: &mut State, depth: usize) {
-    if depth > 16 || out.p.files.iter().any(|f| f == path) {
+    if depth > 16 || out.files.iter().any(|f| f == path) {
         return;
     }
-    out.p.files.push(path.to_path_buf());
+    out.files.push(path.to_path_buf());
     if let Ok(text) = std::fs::read_to_string(path) {
         parse_text(&text, out, depth);
     }
@@ -87,8 +78,8 @@ fn parse_text(text: &str, out: &mut State, depth: usize) {
                         continue;
                     }
                     block.push(a.clone());
-                    if !out.p.hosts.contains(&a) {
-                        out.p.hosts.push(a);
+                    if !out.hosts.contains(&a) {
+                        out.hosts.push(a);
                     }
                 }
             }

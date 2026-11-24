@@ -7,6 +7,13 @@ export interface Keys {
   copy: string;
   paste: string;
   toggle_sidebar: string;
+  peek_sidebar: string;
+}
+
+/** One `[[host]]` entry in config.toml. */
+export interface HostEntry {
+  name: string;
+  auto_connect: boolean;
 }
 
 export interface Config {
@@ -15,7 +22,7 @@ export interface Config {
   line_height: number;
   theme: Record<string, string>;
   keys: Keys;
-  hidden_hosts: string[];
+  host?: HostEntry[];
   local_alias: string | null;
   hide_tmux_status: boolean;
   max_open_sessions: number;
@@ -36,7 +43,9 @@ export interface HostInfo {
   tmux: string | null;
   tmux_version: string | null;
   home: string | null;
-  hidden: boolean;
+  auto_connect: boolean;
+  /** Not connected because auto_connect is off; reconnectHost connects it. */
+  dormant: boolean;
   local: boolean;
   win_powershell: boolean;
   hooks_installed: boolean;
@@ -86,6 +95,7 @@ export interface UiState {
   list_mode: ListMode;
   sidebar_width: number;
   sidebar_collapsed: boolean;
+  sidebar_auto_hide: boolean;
   font_zoom: number;
 }
 
@@ -144,13 +154,16 @@ export const api = {
   selectWindow: (host: string, slug: string, window: string) =>
     invoke<void>("select_window", { host, slug, window }),
   completePath: (host: string, prefix: string) => invoke<string[]>("complete_path", { host, prefix }),
+  pasteImage: (host: string) => invoke<string | null>("paste_image", { host }),
+  dropFiles: (host: string, paths: string[]) => invoke<string[]>("drop_files", { host, paths }),
   attachCommandText: (host: string, slug: string) => invoke<string>("attach_command_text", { host, slug }),
   reconnectHost: (host: string) => invoke<void>("reconnect_host", { host }),
-  setHostHidden: (host: string, hidden: boolean) => invoke<void>("set_host_hidden", { host, hidden }),
+  setHosts: (hosts: HostEntry[]) => invoke<void>("set_hosts", { hosts }),
+  sshAliases: () => invoke<string[]>("ssh_aliases"),
   hooksPlan: (host: string, install: boolean) => invoke<HookPlan>("hooks_plan", { host, install }),
   hooksApply: (host: string, install: boolean) => invoke<void>("hooks_apply", { host, install }),
   markViewed: (key: string) => invoke<void>("mark_viewed", { key }),
-  setUiState: (s: { listMode?: ListMode; sidebarWidth?: number; sidebarCollapsed?: boolean; fontZoom?: number }) =>
+  setUiState: (s: { listMode?: ListMode; sidebarWidth?: number; sidebarCollapsed?: boolean; sidebarAutoHide?: boolean; fontZoom?: number }) =>
     invoke<void>("set_ui_state", s),
   getState: () => invoke<UiState>("get_state"),
   configPath: () => invoke<string>("config_path"),

@@ -41,6 +41,8 @@ pub struct Keys {
     pub copy: String,
     pub paste: String,
     pub toggle_sidebar: String,
+    /// Shows the sidebar while it is in auto-hide mode.
+    pub peek_sidebar: String,
 }
 
 impl Default for Keys {
@@ -52,7 +54,24 @@ impl Default for Keys {
             copy: "Ctrl+Shift+C".into(),
             paste: "Ctrl+Shift+V".into(),
             toggle_sidebar: "Ctrl+Shift+B".into(),
+            peek_sidebar: "Ctrl+Alt+B".into(),
         }
+    }
+}
+
+/// One host in the sidebar. `name` is anything `ssh` accepts as a destination:
+/// an alias from ~/.ssh/config such as `intra`, `user@server`, or `local`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct HostEntry {
+    pub name: String,
+    /// Connect when the app starts. Off: connect on first click.
+    pub auto_connect: bool,
+}
+
+impl Default for HostEntry {
+    fn default() -> Self {
+        HostEntry { name: String::new(), auto_connect: true }
     }
 }
 
@@ -65,6 +84,13 @@ pub struct Config {
     /// xterm.js theme keys (background, foreground, cursor, black, red, ...).
     pub theme: BTreeMap<String, String>,
     pub keys: Keys,
+    /// Hosts shown, in order (`[[host]]` tables). None until first written:
+    /// then the list is built once from ~/.ssh/config (see `migrate_hosts`).
+    #[serde(rename = "host", skip_serializing_if = "Option::is_none")]
+    pub host_list: Option<Vec<HostEntry>>,
+    /// Legacy: hosts hidden before the `[[host]]` list existed. Read once by
+    /// `migrate_hosts`, then removed from the file.
+    #[serde(skip_serializing)]
     pub hidden_hosts: Vec<String>,
     /// The ssh alias that refers to this machine, so it is not listed twice.
     pub local_alias: Option<String>,
@@ -117,11 +143,12 @@ impl Default for Config {
             line_height: 1.1,
             theme,
             keys: Keys::default(),
+            host_list: None,
             hidden_hosts: vec![],
             local_alias: None,
             hide_tmux_status: true,
             max_open_sessions: 8,
-            pin_attention: true,
+            pin_attention: false,
             notify_permission: false,
             mouse: true,
             local_shell: None,
@@ -136,11 +163,22 @@ const CONFIG_TEMPLATE: &str = r##"# myterm settings. Changes are picked up autom
 # font_size = 13
 # line_height = 1.1
 
-# The ssh alias that points at this machine, so it is not listed twice.
+# The ssh alias that points at this machine, so it is not added twice.
 # local_alias = "my-laptop"
 
-# Hosts not shown or connected to. "Hide host" in the palette edits this list.
-hidden_hosts = []
+# Hosts in the sidebar, in this order. Manage them with the "Hosts" dialog
+# (the host button in the sidebar) or edit them here. `name` is anything ssh
+# accepts: an alias from ~/.ssh/config such as "intra", or "user@server".
+# "local" is this machine. auto_connect = false connects on first click.
+# On first run the list is filled from ~/.ssh/config.
+#
+# [[host]]
+# name = "local"
+# auto_connect = true
+#
+# [[host]]
+# name = "intra"
+# auto_connect = false
 
 # Hide the tmux status bar in sessions the app creates.
 # hide_tmux_status = true
@@ -148,8 +186,9 @@ hidden_hosts = []
 # Background sessions kept connected; the least recently viewed is detached beyond this.
 # max_open_sessions = 8
 
-# Pin sessions that need attention to a "Needs you" section.
-# pin_attention = true
+# Also move sessions that need attention into a "Needs you" section at the
+# top. Off: they stay in place and are highlighted.
+# pin_attention = false
 
 # OS notification when a session you are not looking at waits for permission.
 # notify_permission = false
@@ -167,6 +206,7 @@ hidden_hosts = []
 # copy = "Ctrl+Shift+C"
 # paste = "Ctrl+Shift+V"
 # toggle_sidebar = "Ctrl+Shift+B"
+# peek_sidebar = "Ctrl+Alt+B"
 
 # [theme]
 # background = "#16181d"
@@ -202,27 +242,76 @@ pub fn load_config() -> (Config, Option<String>) {
     }
 }
 
-/// Adds or removes a host from `hidden_hosts`, preserving the rest of the file.
-pub fn set_host_hidden(alias: &str, hidden: bool) -> anyhow::Result<()> {
+/// Writes the `[[host]]` list, preserving the rest of the file, and drops the
+/// legacy `hidden_hosts` key.
+pub fn write_hosts(list: &[HostEntry]) -> anyhow::Result<()> {
     let path = config_path();
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = text.parse()?;
-    let mut list: Vec<String> = doc
-        .get("hidden_hosts")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    list.retain(|h| h != alias);
-    if hidden {
-        list.push(alias.to_string());
-    }
-    let mut arr = toml_edit::Array::new();
-    for h in list {
-        arr.push(h);
-    }
-    doc["hidden_hosts"] = toml_edit::value(arr);
-    std::fs::write(&path, doc.to_string())?;
+    let _ = std::fs::create_dir_all(data_dir());
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| CONFIG_TEMPLATE.to_string());
+    std::fs::write(&path, with_hosts(&text, list)?)?;
     Ok(())
+}
+
+/// Drops a one-line `hidden_hosts = [...]` and the template comment above it
+/// as text: toml_edit keeps the comments above a key as part of that key, so
+/// removing it there would also delete the file's header.
+fn strip_hidden_hosts(text: &str) -> String {
+    let mut out: Vec<&str> = vec![];
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("hidden_hosts") && t.contains(']') {
+            if out.last().is_some_and(|l| l.trim_start().starts_with("# Hosts not shown or connected to")) {
+                out.pop();
+            }
+            continue;
+        }
+        out.push(line);
+    }
+    let mut s = out.join("\n");
+    if text.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
+fn with_hosts(text: &str, list: &[HostEntry]) -> anyhow::Result<String> {
+    let mut doc: toml_edit::DocumentMut = strip_hidden_hosts(text).parse()?;
+    // A multi-line list is left to toml_edit.
+    doc.remove("hidden_hosts");
+    doc.remove("host");
+    if list.is_empty() {
+        // An empty list must still exist, or the next start would re-import.
+        doc["host"] = toml_edit::value(toml_edit::Array::new());
+    } else {
+        let mut arr = toml_edit::ArrayOfTables::new();
+        for (i, h) in list.iter().enumerate() {
+            let mut t = toml_edit::Table::new();
+            if i == 0 {
+                t.decor_mut().set_prefix(
+                    "\n# Hosts in the sidebar, in this order. Edited by the Hosts dialog; hand\n\
+                     # edits work too. name: an ssh destination, e.g. an alias from ~/.ssh/config.\n\
+                     # auto_connect = false: connect on first click instead of at start.\n",
+                );
+            }
+            t["name"] = toml_edit::value(h.name.clone());
+            t["auto_connect"] = toml_edit::value(h.auto_connect);
+            arr.push(t);
+        }
+        doc["host"] = toml_edit::Item::ArrayOfTables(arr);
+    }
+    Ok(doc.to_string())
+}
+
+/// Removes duplicate and empty names, keeping the first of each.
+pub fn clean_hosts(list: Vec<HostEntry>) -> Vec<HostEntry> {
+    let mut out: Vec<HostEntry> = vec![];
+    for mut h in list {
+        h.name = h.name.trim().to_string();
+        if !h.name.is_empty() && !out.iter().any(|x| x.name == h.name) {
+            out.push(h);
+        }
+    }
+    out
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -255,6 +344,9 @@ pub struct State {
     pub list_mode: String,
     pub sidebar_width: f64,
     pub sidebar_collapsed: bool,
+    /// The sidebar slides over the terminal when the pointer reaches the left
+    /// edge (or on peek_sidebar), and hides again when it leaves.
+    pub sidebar_auto_hide: bool,
     /// Points added to font_size by Ctrl+= / Ctrl+-.
     pub font_zoom: i32,
 }
@@ -269,6 +361,7 @@ impl Default for State {
             list_mode: "recent".into(),
             sidebar_width: 280.0,
             sidebar_collapsed: false,
+            sidebar_auto_hide: false,
             font_zoom: 0,
         }
     }
@@ -288,5 +381,65 @@ pub fn save_state(s: &State) {
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, state_path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_list_parses_in_order() {
+        let c: Config = toml::from_str(
+            "[[host]]\nname = \"local\"\n\n[[host]]\nname = \"intra\"\nauto_connect = false\n\n[hosts.intra]\nmouse = false\n",
+        )
+        .unwrap();
+        let l = c.host_list.unwrap();
+        assert_eq!(l.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["local", "intra"]);
+        assert!(l[0].auto_connect);
+        assert!(!l[1].auto_connect);
+        assert_eq!(c.hosts["intra"].mouse, Some(false));
+        // No list at all means "not set up yet", not "no hosts".
+        assert!(toml::from_str::<Config>("font_size = 12").unwrap().host_list.is_none());
+        assert_eq!(toml::from_str::<Config>("host = []").unwrap().host_list, Some(vec![]));
+    }
+
+    #[test]
+    fn writes_hosts_keeping_the_rest() {
+        let e = |n: &str, a: bool| HostEntry { name: n.into(), auto_connect: a };
+        let start = "font_size = 14\nhidden_hosts = [\"x\"]\n\n[hosts.intra]\nmouse = false\n";
+        let text = with_hosts(start, &[e("local", true), e("intra", false)]).unwrap();
+        let c: Config = toml::from_str(&text).unwrap();
+        assert_eq!(c.font_size, 14.0);
+        assert!(c.hidden_hosts.is_empty());
+        assert_eq!(c.hosts["intra"].mouse, Some(false));
+        assert_eq!(c.host_list, Some(vec![e("local", true), e("intra", false)]));
+        // Rewriting replaces the list rather than appending to it.
+        let text = with_hosts(&text, &[e("intra", true)]).unwrap();
+        assert_eq!(toml::from_str::<Config>(&text).unwrap().host_list, Some(vec![e("intra", true)]));
+        let text = with_hosts(&text, &[]).unwrap();
+        assert_eq!(toml::from_str::<Config>(&text).unwrap().host_list, Some(vec![]));
+        // The template itself parses, with no list yet.
+        assert!(toml::from_str::<Config>(CONFIG_TEMPLATE).unwrap().host_list.is_none());
+    }
+
+    #[test]
+    fn migrates_an_old_file() {
+        let old = "# intro\n\n# Hosts not shown or connected to. \"Hide host\" in the palette edits this list.\nhidden_hosts = []\n\n# hide_tmux_status = true\n\n[hosts.het1-ts]\ntmux_path = \"/x/tmux\"\n";
+        let e = |n: &str| HostEntry { name: n.into(), auto_connect: true };
+        let text = with_hosts(old, &[e("local"), e("het1-ts")]).unwrap();
+        assert!(!text.contains("Hide host"));
+        assert!(text.starts_with("# intro\n"));
+        assert!(text.contains("# hide_tmux_status = true"));
+        let c: Config = toml::from_str(&text).unwrap();
+        assert_eq!(c.hosts["het1-ts"].tmux_path.as_deref(), Some("/x/tmux"));
+        assert_eq!(c.host_list.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn clean_drops_duplicates_and_blanks() {
+        let e = |n: &str| HostEntry { name: n.into(), auto_connect: true };
+        let l = clean_hosts(vec![e(" a "), e(""), e("b"), e("a")]);
+        assert_eq!(l.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
     }
 }

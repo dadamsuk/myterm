@@ -13,6 +13,15 @@
   --yellow: #e0af68;
   --red: #f7768e;
   --orange: #ff9e64;
+  /* Status dots: hues kept far apart so each state reads at a glance. */
+  --st-working: #4aa8ff; /* blue, pulsing */
+  --st-permission: #ff8a1f; /* amber-orange, with a halo */
+  --st-done: #3ddc84; /* green */
+  --st-idle: #6b7285; /* grey ring */
+  --host-ok: #3ddc84; /* green */
+  --host-eph: #b18cff; /* violet */
+  --host-login: #ffd43b; /* yellow */
+  --host-down: #ff4d6d; /* red */
   --term-bg: #16181d;
   color-scheme: dark;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -181,17 +190,51 @@ kbd {
 }
 
 .dot.working {
-  background: var(--accent);
+  background: var(--st-working);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
 .dot.permission {
-  background: var(--orange);
-  box-shadow: 0 0 0 3px rgba(255, 158, 100, 0.25);
+  background: var(--st-permission);
+  box-shadow: 0 0 0 3px rgba(255, 138, 31, 0.3);
 }
 
 .dot.done {
-  background: var(--green);
+  background: var(--st-done);
+}
+
+.dot.idle {
+  border: 1.5px solid var(--st-idle);
+  width: 7px;
+  height: 7px;
+}
+
+/* Host status dots */
+.hdot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+.hdot.ok {
+  background: var(--host-ok);
+}
+.hdot.eph {
+  background: var(--host-eph);
+}
+.hdot.login {
+  background: var(--host-login);
+}
+.hdot.down {
+  background: var(--host-down);
+}
+.hdot.connecting {
+  background: var(--fg-dim);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.hdot.dormant {
+  border: 1.5px solid var(--fg-faint);
 }
 
 .dot.none {
@@ -209,7 +252,8 @@ kbd {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dot.working {
+  .dot.working,
+  .hdot.connecting {
     animation: none;
   }
 }

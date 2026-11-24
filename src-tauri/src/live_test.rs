@@ -77,3 +77,30 @@ async fn live_rename_window() {
     println!("restore rc={}", r.code);
 }
 
+
+/// Uploads a file through each host's channel and reads its checksum back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn live_upload() {
+    let only = std::env::var("MYTERM_HOST").ok();
+    let data: Vec<u8> = (0..2_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let want = data.len();
+    for h in sshconfig::parse().hosts {
+        if only.as_ref().is_some_and(|o| !o.split(',').any(|x| x.trim() == h)) {
+            continue;
+        }
+        let ch = Channel::spawn(&Target::Ssh(h.clone())).unwrap();
+        let t = std::time::Instant::now();
+        let script = crate::files::upload_script("live.bin", &crate::files::base64(&data));
+        match ch.run(&script, Duration::from_secs(60)).await {
+            Ok(r) if r.code == 0 => {
+                let p = r.out.lines().last().unwrap_or("").to_string();
+                let s = ch.run(&format!("wc -c < '{p}'; rm -f '{p}'"), Duration::from_secs(10)).await.unwrap();
+                let got: usize = s.out.trim().parse().unwrap_or(0);
+                println!("{h}: {p} {got}/{want} bytes in {:?} {}", t.elapsed(), if got == want { "OK" } else { "MISMATCH" });
+            }
+            Ok(r) => println!("{h}: exit {} {}", r.code, r.out.trim()),
+            Err(e) => println!("{h}: {e}"),
+        }
+    }
+}

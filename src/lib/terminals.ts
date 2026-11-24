@@ -6,6 +6,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { ClipboardAddon, type IClipboardProvider } from "@xterm/addon-clipboard";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "@xterm/xterm/css/xterm.css";
 import { api, Channel, type Config, type PtyMessage, type Session } from "./api";
 import { app, fontSize, hostInfo, isMac, markViewed, sessionByKey, toast } from "./store.svelte";
@@ -46,6 +47,13 @@ const clipboardProvider: IClipboardProvider = {
   },
 };
 
+/** Quotes a path for typing into a shell or Claude Code prompt, only when needed. */
+export function quotePath(p: string): string {
+  if (/^[\w@%+=:,./\\~-]+$/.test(p)) return p;
+  if (/^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\")) return `"${p}"`;
+  return `'${p.replace(/'/g, "'\\''")}'`;
+}
+
 function themeOf(cfg: Config | null): ITheme {
   return (cfg?.theme ?? {}) as ITheme;
 }
@@ -63,6 +71,48 @@ class TerminalManager {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = setTimeout(() => this.fitActive(), 50);
     }).observe(container);
+    getCurrentWebview()
+      .onDragDropEvent((ev) => {
+        if (ev.payload.type !== "drop" || !ev.payload.paths.length) return;
+        const e = app.active ? this.entries.get(app.active) : undefined;
+        if (e) this.dropFiles(e, ev.payload.paths);
+      })
+      .catch(() => {});
+  }
+
+  /** Types the paths of dropped files, uploading them first for remote hosts. */
+  private async dropFiles(e: Entry, paths: string[]) {
+    const remote = !hostInfo(e.host)?.local;
+    if (remote) toast(`Uploading ${paths.length === 1 ? "file" : `${paths.length} files`} to ${e.host}…`);
+    try {
+      const out = await api.dropFiles(e.host, paths);
+      if (remote) app.toast = null;
+      e.term.paste(out.map(quotePath).join(" "));
+      e.term.focus();
+    } catch (err) {
+      toast(String(err), true);
+    }
+  }
+
+  /** Pastes clipboard text; failing that, a clipboard image saved as a file on the host. */
+  private async pasteInto(e: Entry) {
+    const t = await readText().catch(() => "");
+    if (t) {
+      e.term.paste(t);
+      return;
+    }
+    const remote = !hostInfo(e.host)?.local;
+    let shown = false;
+    const timer = remote ? setTimeout(() => ((shown = true), toast(`Uploading image to ${e.host}…`)), 300) : undefined;
+    try {
+      const path = await api.pasteImage(e.host);
+      if (shown) app.toast = null;
+      if (path) e.term.paste(quotePath(path));
+    } catch (err) {
+      toast(String(err), true);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   has(key: string) {
@@ -182,11 +232,7 @@ class TerminalManager {
       return false;
     }
     if (isPaste) {
-      if (ev.type === "keydown") {
-        readText()
-          .then((t) => t && e.term.paste(t))
-          .catch(() => {});
-      }
+      if (ev.type === "keydown") this.pasteInto(e);
       ev.preventDefault();
       return false;
     }
@@ -407,8 +453,7 @@ class TerminalManager {
   async paste(key: string) {
     const e = this.entries.get(key);
     if (!e) return;
-    const t = await readText().catch(() => "");
-    if (t) e.term.paste(t);
+    await this.pasteInto(e);
     e.term.focus();
   }
 
