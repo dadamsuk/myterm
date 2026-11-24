@@ -19,7 +19,7 @@ The primary workload is long-running Claude Code sessions started with `--rc '<n
 | Transport | The system `ssh` binary, run in a local PTY. No SSH library |
 | Host list | A list in `config.toml`, managed from the Hosts dialog or by hand; names are ssh destinations (usually `~/.ssh/config` aliases), which keeps the connection details |
 | Persistence on macOS/Linux hosts | tmux, one tmux session per destination |
-| Persistence on Windows hosts | None in v1: sessions are "ephemeral". A keeper mode is planned for v2 |
+| Persistence on Windows hosts | None in v1: sessions are "ephemeral". In v2 a keeper process inside the myterm install holds them (14.1) |
 | Local sessions | Yes; the local machine is just another host |
 | Needs-attention badges | In v1, driven by Claude Code hooks |
 | Quick switcher | Ctrl+Shift+O |
@@ -359,9 +359,59 @@ These are assumptions that need a quick test before the dependent code is writte
 
 ## 14. Planned for v2
 
-**Windows keeper.** The app binary gains a headless mode (`myterm keep`) that runs on a Windows machine, holds ConPTY sessions open, and answers list/attach/create over stdio through ssh. This makes Windows sessions persistent and discoverable, for the Windows host and for local sessions on Windows laptops.
+The main item is the Windows keeper (14.1). Other candidates: floating "previous session" toggle key, per-session notes, sharing `state.json` known folders across my client machines.
 
-Other candidates: floating "previous session" toggle key, per-session notes, sharing `state.json` known folders across my client machines.
+### 14.1 Windows keeper
+
+**Goal.** Sessions on a Windows machine survive disconnects, closing the UI and app updates, and other myterm clients can discover them, the same as tmux sessions. This applies to remote Windows hosts and to local sessions on a Windows client. No WSL, no admin rights, nothing to install beyond myterm itself.
+
+**Why the sessions can't be started over ssh.** Win32-OpenSSH puts every process started in an ssh session into a job object and kills the job when the connection closes, detached children included. So the sessions are started by a process that already runs on the machine outside any ssh session: the keeper. An ssh connection only ever relays bytes to it.
+
+**Processes.**
+
+| Process | Role |
+|---|---|
+| `myterm.exe --keeper` | Headless, one per user per machine. Owns every session's ConPTY (reusing `pty.rs`) and the control pipe. Started by the UI if not running; keeps running after the UI quits. Optional "start keeper at login" (HKCU `Run` key) keeps the machine reachable with no window open |
+| myterm UI | An ordinary pipe client of its local keeper. Local Windows sessions take the same path as remote ones, with no special case |
+| `myterm-cli.exe` | Small console-subsystem helper shipped as a Tauri sidecar, because the GUI-subsystem `myterm.exe` handles stdio poorly under ssh. Relays between its stdio and the keeper's pipe |
+
+A single-instance mutex stops a second keeper starting. The keeper writes its pipe name and the `myterm-cli.exe` path to `%LOCALAPPDATA%\myterm\keeper.json` so ssh commands can find them.
+
+**Control pipe.** `\\.\pipe\myterm-keeper-<user SID>`, created with an explicit DACL that grants access to the owning user's SID only. Pipe names are machine-global, so a pipe created in the desktop logon can be reached from an ssh logon of the same user. Requests are one JSON line each; replies are one JSON line, except `attach`, which switches the connection to a framed byte stream.
+
+| Request | Effect |
+|---|---|
+| `list` | Every session: id, display name, kind, cwd, state, created, last attached, attached client count, exit status if ended |
+| `create {name, kind, cwd, cols, rows}` | Starts the default shell (or `local_shell`) in a ConPTY in `cwd`; for `claude` runs `claude --rc "<name>"`. Passes the session id in `MYTERM_SESSION` for the hooks |
+| `rename {id, name}` / `kill {id}` | As for tmux windows (6.2) |
+| `attach {id, cols, rows}` | Output and input stream, plus resize frames |
+| `upload {name, bytes}` | Writes into `%TEMP%\myterm\` (7, file drop), so Windows hosts can receive uploads |
+| `version` | Keeper and protocol version |
+
+**Remote Windows hosts.** The host channel (5.1) stays one long-lived `ssh -T` per host but runs `myterm-cli channel`, which speaks the same sentinel-framed protocol as the `/bin/sh` channel and forwards each request to the pipe. Polling, create, rename, kill and upload all go through it. Attaching runs `ssh -t <host> myterm-cli attach <id>`. When the connection drops only the helper dies; the reconnect path (5.4) then works unchanged.
+
+**Attach and redraw.** Several clients may attach to one session; input from any is accepted, and the most recently active client's size wins (as tmux). ConPTY keeps no history a client can ask for, so on attach the keeper forces a full repaint by resizing the pseudoconsole (to the attaching size, or by one row and back). A later version can keep screen state and scrollback in the keeper with a VT emulator (`vt100` or `alacritty_terminal`) and replay it instead. Scrollback on Windows sessions is xterm.js's and covers only what that client has seen.
+
+**Host kind and bootstrap.** The Windows probe (channel.rs) then checks for the keeper:
+
+- `myterm-cli` found and keeper running → kind `keeper`; sessions are persistent and discoverable.
+- `myterm-cli` found, keeper not running → the channel starts it, detached from the ssh job via WMI (`Win32_Process.Create`), and reports a note on the host that it will stop at logoff.
+- myterm not installed → kind `ephemeral` as in v1 (5.6).
+
+A version mismatch between client and keeper shows on the host heading; the protocol carries a version so older keepers can still be listed.
+
+**Attention state.** The Claude hook script on Windows writes the state file keyed by `MYTERM_SESSION` (8.5) and the keeper includes that state in `list`, so the channel no longer reads the folder itself.
+
+**Lifetime.** Sessions end on reboot or logoff, as with tmux. Quitting the UI, updating it, or a UI crash does not touch them. Updating the keeper itself ends its sessions, so the updater asks first when any are running and otherwise leaves the old keeper running until it is idle. Processes run in the user's interactive logon, so they have the user's full credentials (network shares, DPAPI), unlike processes started directly by sshd.
+
+**Model changes.** Host kind gains `keeper`. On keeper hosts `persistent` is true, rows have no windows (one row per session, like ephemeral rows today), and the ephemeral marker and quit warning do not apply.
+
+**To verify first.**
+
+1. A process started by WMI from an ssh session survives the disconnect.
+2. A pipe created in the desktop logon with a user-SID DACL accepts a connection from an ssh (S4U) logon of the same user.
+3. Resizing the pseudoconsole repaints the full screen for Claude Code and for PowerShell/cmd.
+4. `myterm-cli` under `ssh -t` passes keys, resize and UTF-8 through Win32-OpenSSH's own ConPTY without mangling.
 
 ## 15. Resolved questions
 
