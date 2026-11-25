@@ -254,6 +254,11 @@
         </div>
       {/if}
     </div>
+    <div class="actions">
+      <button class="btn" onclick={() => (app.overlay = null)}>Cancel</button>
+      <button class="btn primary" disabled={busy || !hosts.some((h) => h.alias === host)} onclick={submit}
+        title="Create {target ? 'the window' : 'the session'} (Enter in the Name field)">OK</button>
+    </div>
   </div>
 </div>
 
@@ -332,5 +337,12 @@
   }
   .warn {
     color: var(--yellow);
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 10px 14px 12px;
+    border-top: 1px solid var(--border);
   }
 </style>
