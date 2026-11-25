@@ -195,7 +195,11 @@ const byRecent = (a: Row, b: Row) => rowLastUsed(b) - rowLastUsed(a) || byName(a
 
 export interface Group {
   title: string;
+  /** Unique key for the list; defaults to title plus host. */
+  key?: string;
   host?: HostInfo;
+  /** A name group in Name mode: its rows are labelled by machine. */
+  byName?: boolean;
   rows: Row[];
 }
 
@@ -211,7 +215,23 @@ export function groupedRows(): Group[] {
       groups.push({ title: h.alias, host: h, rows: rest.filter((r) => r.s.host === h.alias).sort(byTmuxOrder) });
     }
   } else if (app.listMode === "name") {
-    groups.push({ title: "", rows: rest.sort(byName) });
+    // One group per name, its rows one per machine; a name used once sits at
+    // the top level as an untitled group of one.
+    const hostOrder = new Map(app.hosts.map((h, i) => [h.alias, i]));
+    const byHost = (a: Row, b: Row) =>
+      (hostOrder.get(a.s.host) ?? 1e9) - (hostOrder.get(b.s.host) ?? 1e9) || byTmuxOrder(a, b);
+    const byNameKey = new Map<string, Row[]>();
+    for (const r of rest.sort(byName)) {
+      // Case-insensitive: "BigSkySim" and "bigskysim" share a group.
+      const n = rowName(r).toLocaleLowerCase();
+      const list = byNameKey.get(n);
+      if (list) list.push(r);
+      else byNameKey.set(n, [r]);
+    }
+    for (const [n, rows] of byNameKey) {
+      if (rows.length === 1) groups.push({ title: "", key: `name:${rows[0].key}`, rows });
+      else groups.push({ title: rowName(rows[0]), key: `name:${n}`, byName: true, rows: rows.sort(byHost) });
+    }
   } else {
     groups.push({ title: "", rows: rest.sort(byRecent) });
   }

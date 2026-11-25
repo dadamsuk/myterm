@@ -178,7 +178,7 @@ Toggle modes:
 | Mode | Order |
 |---|---|
 | Machine | Grouped under host headings; within a group, by name |
-| Name | Flat, alphabetical |
+| Name | Alphabetical. A name used by more than one session (ignoring case) gets a heading, with one row per machine beneath it (folder and time on each); a name used once is a single row at the top level |
 | Recent | Flat, most recently used first (default) |
 
 In every mode, sessions that need attention stay where they are in the list and are highlighted: an orange bar and tint for a permission wait, green for finished-but-unseen. Setting `pin_attention = true` also moves them into a "Needs you" section at the top.

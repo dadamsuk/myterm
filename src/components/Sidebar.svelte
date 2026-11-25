@@ -115,7 +115,7 @@
   </div>
 
   <div class="list">
-    {#each groups as g (g.title + (g.host?.alias ?? ""))}
+    {#each groups as g, gi (g.key ?? g.title + (g.host?.alias ?? ""))}
       {#if g.title}
         <div class="group" class:attention={g.title === "Needs you" && !g.host}>
           {#if g.host}
@@ -144,6 +144,8 @@
           class:active={rowOnScreen(r)}
           class:greyed={!isReachable(r.s)}
           class:eph={!r.s.persistent}
+          class:child={g.byName}
+          class:after-group={!g.title && gi > 0 && groups[gi - 1].byName}
           class:needs-permission={rowNeedsAttention(r) && rowDot(r) === "permission"}
           class:needs-done={rowNeedsAttention(r) && rowDot(r) === "done"}
           onclick={() => activateRow(r)}
@@ -152,14 +154,16 @@
         >
           <span class="num">{(numbers.get(r.key) ?? 99) <= 9 ? numbers.get(r.key) : ""}</span>
           <span class="dot {rowDot(r)}"></span>
-          <span class="name" class:full={app.listMode === "name"}>{rowName(r)}</span>
-          {#if app.listMode !== "name"}
+          {#if g.byName}
+            <span class="name">{r.s.host}</span>
+          {:else}
+            <span class="name">{rowName(r)}</span>
+          {/if}
           {#if !r.s.persistent}<span class="tag" title="Ends when the app quits">eph</span>{/if}
           {#if r.s.persistent && multiSession(r.s.host)}<span class="sess" title="tmux session">{r.s.display_name}</span>{/if}
-          {#if app.listMode !== "machine"}<span class="host">{r.s.host}</span>{/if}
+          {#if app.listMode !== "machine" && !g.byName}<span class="host">{r.s.host}</span>{/if}
           <span class="folder">{basename(rowCwd(r))}</span>
           <span class="time">{ago(r, now)}</span>
-          {/if}
         </button>
       {/each}
       {#if g.host && g.rows.length === 0}
@@ -275,10 +279,6 @@
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
-  .name.full {
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
   .modes {
     display: flex;
     margin: 6px 10px 6px;
@@ -374,6 +374,14 @@
   }
   .row:hover {
     background: var(--hover);
+  }
+  /* Name mode: rows under a name heading are indented, so a top-level row
+     after the group doesn't read as part of it. */
+  .row.child {
+    padding-left: 20px;
+  }
+  .row.after-group {
+    margin-top: 6px;
   }
   .row.active {
     background: var(--selected);
