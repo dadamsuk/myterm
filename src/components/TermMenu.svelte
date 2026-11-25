@@ -34,6 +34,7 @@
   <button role="menuitem" onclick={() => run((k) => terminals.selectAll(k))}><span>Select all</span></button>
   {#if !terminals.isTmux(menu.key)}
     <button role="menuitem" onclick={() => run((k) => terminals.clear(k))}><span>Clear scrollback</span></button>
+    <button role="menuitem" onclick={() => run((k) => terminals.resetModes(k))}><span>Reset terminal modes</span></button>
   {:else if !menu.selection}
     <div class="note">Shift+drag selects text in tmux</div>
   {/if}

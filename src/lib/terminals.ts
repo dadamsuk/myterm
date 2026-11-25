@@ -471,6 +471,26 @@ class TerminalManager {
     e?.term.focus();
   }
 
+  /**
+   * Turns off input modes a program left on when it exited or was killed:
+   * mouse reporting, focus events, bracketed paste, application cursor keys and
+   * keypad, and a hidden cursor. Stops echoed junk like `^[[<35;41;23M` on mouse
+   * moves. Only myterm's emulator changes; nothing is sent to the program, and
+   * the screen and scrollback are kept.
+   */
+  resetModes(key: string) {
+    const e = this.entries.get(key);
+    if (!e) return;
+    e.term.write(
+      "\x1b[?9l\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l" + // mouse tracking
+        "\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" + // mouse encodings
+        "\x1b[?1004l\x1b[?2004l" + // focus events, bracketed paste
+        "\x1b[?1l\x1b>" + // normal cursor keys and keypad
+        "\x1b[?25h", // show the cursor
+    );
+    e.term.focus();
+  }
+
   isTmux(key: string) {
     return this.entries.get(key)?.kind === "tmux";
   }
