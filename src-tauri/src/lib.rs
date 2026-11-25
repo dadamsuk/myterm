@@ -227,6 +227,8 @@ fn set_ui_state(
     sidebar_collapsed: Option<bool>,
     sidebar_auto_hide: Option<bool>,
     font_zoom: Option<i32>,
+    open_sessions: Option<Vec<String>>,
+    active_row: Option<String>,
 ) {
     let mut st = app.state.lock().unwrap();
     if let Some(m) = list_mode {
@@ -243,6 +245,13 @@ fn set_ui_state(
     }
     if let Some(z) = font_zoom {
         st.font_zoom = z;
+    }
+    if let Some(o) = open_sessions {
+        st.open_sessions = o;
+    }
+    // "" clears it: nothing on screen.
+    if let Some(r) = active_row {
+        st.active_row = (!r.is_empty()).then_some(r);
     }
     drop(st);
     app.mark_state_dirty();

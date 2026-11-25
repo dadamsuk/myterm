@@ -437,6 +437,11 @@ pub struct State {
     pub sidebar_auto_hide: bool,
     /// Points added to font_size by Ctrl+= / Ctrl+-.
     pub font_zoom: i32,
+    /// Session keys of the open terminals, most recently shown first;
+    /// reopened at start-up.
+    pub open_sessions: Vec<String>,
+    /// The row on screen: a session key, or "host/slug:@id" for a tmux window.
+    pub active_row: Option<String>,
 }
 
 impl Default for State {
@@ -451,6 +456,8 @@ impl Default for State {
             sidebar_collapsed: false,
             sidebar_auto_hide: false,
             font_zoom: 0,
+            open_sessions: Vec::new(),
+            active_row: None,
         }
     }
 }

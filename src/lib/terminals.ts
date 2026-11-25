@@ -9,8 +9,9 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "@xterm/xterm/css/xterm.css";
 import { api, Channel, type Config, type PtyMessage, type Session } from "./api";
-import { app, fontSize, hostInfo, isMac, markViewed, sessionByKey, toast } from "./store.svelte";
+import { activeRow, app, fontSize, hostInfo, isMac, isReachable, markViewed, sessionByKey, toast } from "./store.svelte";
 import { matches, parseBinding } from "./keys";
+import { sessionKeyOfRow } from "./rowkey";
 
 const BACKOFF = [1, 2, 5, 10, 30];
 
@@ -43,6 +44,9 @@ interface Entry {
   typed: { lines: string[]; cur: string; edited: boolean; skipped: number };
 }
 
+/** How long start-up keeps waiting for the hosts of sessions to reopen. */
+const RESTORE_MS = 60000;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const clipboardProvider: IClipboardProvider = {
@@ -69,6 +73,9 @@ class TerminalManager {
   private container: HTMLElement | null = null;
   private resizeTimer?: ReturnType<typeof setTimeout>;
   private seq = 0;
+  private viewTimer?: ReturnType<typeof setTimeout>;
+  /** Sessions saved as open, still waiting for their host at start-up. */
+  private restoring: { keys: string[]; active: string | null; until: number } | null = null;
 
   mount(container: HTMLElement) {
     this.container = container;
@@ -458,6 +465,70 @@ class TerminalManager {
       this.show(s.key);
     }
     this.evict();
+    this.viewChanged();
+  }
+
+  /** Attaches a session without showing it. The terminal is sized to the
+   *  pane first, so tmux does not see an 80x24 client. */
+  private openHidden(s: Session, lastShown: number) {
+    if (this.entries.has(s.key)) return;
+    const e = this.create(s.key, "tmux", s.host, s.slug, hostInfo(s.host)?.kind === "keeper");
+    e.lastShown = lastShown;
+    e.el.style.visibility = "hidden";
+    e.el.style.display = "block";
+    try {
+      e.fit.fit();
+    } catch {
+      /* not laid out yet */
+    }
+    e.el.style.display = "none";
+    e.el.style.visibility = "";
+    this.connect(e);
+  }
+
+  /** Starts reopening the sessions that were open when the app last ran. */
+  startRestore(keys: string[], active: string | null) {
+    if (keys.length) this.restoring = { keys: [...keys], active: active ? sessionKeyOfRow(active) : null, until: Date.now() + RESTORE_MS };
+  }
+
+  /**
+   * Opens each saved session once its host is usable, keeping their order of
+   * use. The one that was on screen is shown, unless something else has been
+   * opened by then. Its window is not selected: another client may have moved
+   * on since, and tmux's current window is shared. Called when sessions or
+   * hosts change.
+   */
+  restoreTick() {
+    const r = this.restoring;
+    if (!r) return;
+    const now = Date.now();
+    r.keys = r.keys.filter((key, i) => {
+      const s = sessionByKey(key);
+      if (!s || !s.persistent || !isReachable(s)) return true;
+      if (key === r.active && app.active === null) this.open(s);
+      else this.openHidden(s, now - (i + 1) * 1000);
+      return false;
+    });
+    if (!r.keys.length || now > r.until) this.restoring = null;
+    this.evict();
+    this.viewChanged();
+  }
+
+  /** Saves which sessions are open and which row is on screen, shortly. */
+  viewChanged() {
+    clearTimeout(this.viewTimer);
+    this.viewTimer = setTimeout(() => {
+      const open = [...this.entries.values()]
+        // An ended session has nothing to reopen.
+        .filter((e) => e.kind === "tmux" && sessionByKey(e.key))
+        .sort((a, b) => b.lastShown - a.lastShown)
+        .map((e) => e.key);
+      // Sessions still waiting for their host stay on the list, in case the
+      // app is closed before they come back.
+      for (const k of this.restoring?.keys ?? []) if (!open.includes(k)) open.push(k);
+      const row = activeRow()?.key ?? (this.restoring?.active || "");
+      api.setUiState({ openSessions: open, activeRow: row }).catch(() => {});
+    }, 500);
   }
 
   openLogin(host: string) {
@@ -520,6 +591,7 @@ class TerminalManager {
       });
     }
     if (sessionByKey(key)) markViewed(key);
+    this.viewChanged();
   }
 
   /** Menu actions; each returns focus to the terminal. */
@@ -604,6 +676,7 @@ class TerminalManager {
     this.entries.delete(key);
     delete app.termStatus[key];
     if (app.active === key) app.active = null;
+    this.viewChanged();
   }
 
   /** Detaches the least recently viewed tmux sessions beyond the cap. */

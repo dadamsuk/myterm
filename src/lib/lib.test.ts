@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fuzzyFilter, fuzzyScore } from "./fuzzy";
 import { diffLines, hunks } from "./diff";
 import { matches, parseBinding } from "./keys";
+import { sessionKeyOfRow } from "./rowkey";
 
 describe("fuzzy", () => {
   it("matches subsequences and rejects non-matches", () => {
@@ -52,5 +53,13 @@ describe("keys", () => {
     const e = ev({ metaKey: true, shiftKey: true, key: "P", code: "KeyP" });
     expect(matches(e, b, true)).toBe(true);
     expect(matches(e, b, false)).toBe(false);
+  });
+});
+
+describe("sessionKeyOfRow", () => {
+  it("drops the window part of a row key", () => {
+    expect(sessionKeyOfRow("intra/0:@84")).toBe("intra/0");
+    expect(sessionKeyOfRow("local/1795621712003")).toBe("local/1795621712003");
+    expect(sessionKeyOfRow("local/~eph-1795564925000")).toBe("local/~eph-1795564925000");
   });
 });

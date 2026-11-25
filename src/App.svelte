@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
   import { api, type Config, type Snapshot } from "./lib/api";
-  import { activeWindow, app, isMac, sessionByKey, sidebarRows, toast, windowKey } from "./lib/store.svelte";
+  import { activeRow, activeWindow, app, isMac, sessionByKey, sidebarRows, toast, windowKey } from "./lib/store.svelte";
   import { terminals } from "./lib/terminals";
   import { matches, parseBinding } from "./lib/keys";
   import { activateRow, autostartSaved, peekSidebar, toggleSidebar } from "./lib/actions";
@@ -124,6 +124,21 @@
     autostartSaved();
   });
 
+  // Sessions open when the app last ran reopen as their hosts come up.
+  $effect(() => {
+    if (!app.ready) return;
+    app.hosts;
+    app.sessions;
+    untrack(() => terminals.restoreTick());
+  });
+
+  // The window on screen can change without a click here (another client).
+  $effect(() => {
+    if (!app.ready) return;
+    activeRow()?.key;
+    untrack(() => terminals.viewChanged());
+  });
+
   // Leaving overlays returns focus to the terminal.
   $effect(() => {
     if (app.overlay === null) queueMicrotask(() => terminals.focusActive());
@@ -159,6 +174,7 @@
       app.fontZoom = b.state.font_zoom ?? 0;
       applyConfig(b.config, b.config_error);
       applySnapshot(b.snapshot);
+      terminals.startRestore(b.state.open_sessions ?? [], b.state.active_row ?? null);
       app.ready = true;
       unlisten.push(listen<Snapshot>("snapshot", (ev) => applySnapshot(ev.payload)));
       unlisten.push(listen<{ config: Config; error: string | null }>("config", (ev) => applyConfig(ev.payload.config, ev.payload.error)));

@@ -110,6 +110,10 @@ export interface UiState {
   sidebar_collapsed: boolean;
   sidebar_auto_hide: boolean;
   font_zoom: number;
+  /** Session keys of the open terminals, most recently shown first. */
+  open_sessions?: string[];
+  /** The row on screen: a session key, or "host/slug:@id" for a tmux window. */
+  active_row?: string | null;
 }
 
 export type ListMode = "machine" | "name" | "recent";
@@ -177,8 +181,16 @@ export const api = {
   hooksPlan: (host: string, install: boolean) => invoke<HookPlan>("hooks_plan", { host, install }),
   hooksApply: (host: string, install: boolean) => invoke<void>("hooks_apply", { host, install }),
   markViewed: (key: string) => invoke<void>("mark_viewed", { key }),
-  setUiState: (s: { listMode?: ListMode; sidebarWidth?: number; sidebarCollapsed?: boolean; sidebarAutoHide?: boolean; fontZoom?: number }) =>
-    invoke<void>("set_ui_state", s),
+  setUiState: (s: {
+    listMode?: ListMode;
+    sidebarWidth?: number;
+    sidebarCollapsed?: boolean;
+    sidebarAutoHide?: boolean;
+    fontZoom?: number;
+    openSessions?: string[];
+    /** "" for nothing on screen. */
+    activeRow?: string;
+  }) => invoke<void>("set_ui_state", s),
   getState: () => invoke<UiState>("get_state"),
   configPath: () => invoke<string>("config_path"),
   openConfig: () => invoke<void>("open_config"),
