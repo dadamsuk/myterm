@@ -1,5 +1,5 @@
 import { isLive } from "./hostdot";
-import type { Config, HostInfo, ListMode, Session, Window } from "./api";
+import type { Config, HostInfo, ListMode, SavedSession, Session, Window } from "./api";
 import { api } from "./api";
 
 export type Overlay =
@@ -10,6 +10,8 @@ export type Overlay =
   | { kind: "hooks"; host: string; install: boolean }
   | { kind: "confirm-quit"; count: number }
   | { kind: "hosts" }
+  /** Save a running session (`row`) or edit a saved one (`saved`). */
+  | { kind: "save"; row?: Row; saved?: SavedSession }
   | null;
 
 export interface TermStatus {

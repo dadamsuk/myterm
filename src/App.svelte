@@ -6,7 +6,7 @@
   import { activeWindow, app, isMac, sessionByKey, sidebarRows, toast, windowKey } from "./lib/store.svelte";
   import { terminals } from "./lib/terminals";
   import { matches, parseBinding } from "./lib/keys";
-  import { activateRow, peekSidebar, toggleSidebar } from "./lib/actions";
+  import { activateRow, autostartSaved, peekSidebar, toggleSidebar } from "./lib/actions";
   import Sidebar from "./components/Sidebar.svelte";
   import Header from "./components/Header.svelte";
   import TerminalPane from "./components/TerminalPane.svelte";
@@ -19,6 +19,7 @@
   import HostsDialog from "./components/HostsDialog.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
   import TermMenu from "./components/TermMenu.svelte";
+  import SaveSession from "./components/SaveSession.svelte";
 
   function applySnapshot(s: Snapshot) {
     const before = new Map(app.sessions.map((x) => [x.key, x.state]));
@@ -115,6 +116,14 @@
     }, 350);
   }
 
+  // Saved sessions with autostart start once their host is usable.
+  $effect(() => {
+    if (!app.ready) return;
+    app.hosts;
+    app.config?.saved;
+    autostartSaved();
+  });
+
   // Leaving overlays returns focus to the terminal.
   $effect(() => {
     if (app.overlay === null) queueMicrotask(() => terminals.focusActive());
@@ -198,6 +207,8 @@
   <ConfirmQuit count={app.overlay.count} />
 {:else if app.overlay?.kind === "hosts"}
   <HostsDialog />
+{:else if app.overlay?.kind === "save"}
+  <SaveSession row={app.overlay.row} saved={app.overlay.saved} />
 {/if}
 
 {#if app.menu}

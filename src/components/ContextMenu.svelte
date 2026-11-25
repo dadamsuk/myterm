@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from "../lib/store.svelte";
-  import { copyAttachCommand, killRow } from "../lib/actions";
+  import { copyAttachCommand, findSaved, killRow } from "../lib/actions";
+  import { rowName } from "../lib/store.svelte";
 
   let menu = $derived(app.menu!);
   let el: HTMLDivElement | undefined = $state();
@@ -23,6 +24,9 @@
   <button role="menuitem" onclick={() => { const row = menu.row; close(); app.overlay = { kind: "rename", row }; }}>Rename…</button>
   <button role="menuitem" class="danger" onclick={() => killRow(menu.row)}>
     {menu.row.w && menu.row.s.windows.length > 1 ? "Kill window" : "Kill"}
+  </button>
+  <button role="menuitem" onclick={() => { const row = menu.row; close(); app.overlay = { kind: "save", row }; }}>
+    {findSaved(menu.row.s.host, rowName(menu.row)) ? "Edit saved session…" : "Save session…"}
   </button>
   {#if menu.row.s.persistent}
     <button role="menuitem" onclick={() => copyAttachCommand(menu.row.s)}>Copy attach command</button>

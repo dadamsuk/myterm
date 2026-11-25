@@ -1,6 +1,17 @@
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { api, type HostEntry, type HostInfo, type Session, type Window } from "./api";
-import { app, hostInfo, isReachable, setSidebar, setSidebarAutoHide, toast, windowTarget, type Row } from "./store.svelte";
+import { api, type HostEntry, type HostInfo, type SavedSession, type Session, type Window } from "./api";
+import {
+  app,
+  hostInfo,
+  isReachable,
+  rowName,
+  setSidebar,
+  setSidebarAutoHide,
+  toast,
+  visibleRows,
+  windowTarget,
+  type Row,
+} from "./store.svelte";
 import { terminals } from "./terminals";
 import { isLive } from "./hostdot";
 
@@ -92,15 +103,24 @@ export async function copyAttachCommand(s: Session) {
   }
 }
 
-export async function createSession(host: string, dir: string, name: string, kind: "claude" | "shell") {
+/** Creates and shows a session; returns the key of the terminal it is in. */
+export async function createSession(
+  host: string,
+  dir: string,
+  name: string,
+  kind: "claude" | "shell",
+): Promise<string | undefined> {
   const h = hostInfo(host);
-  if (!h) return toast(`Unknown host ${host}`, true);
-  app.overlay = null;
-  if (h.kind === "ephemeral") {
-    await terminals.openEphemeral(host, dir, name, kind);
+  if (!h) {
+    toast(`Unknown host ${host}`, true);
     return;
   }
-  if (!isLive(h)) return toast(`${host} is not available: ${h.status}`, true);
+  app.overlay = null;
+  if (h.kind === "ephemeral") return terminals.openEphemeral(host, dir, name, kind);
+  if (!isLive(h)) {
+    toast(`${host} is not available: ${h.status}`, true);
+    return;
+  }
   const target = windowTarget(host);
   if (target) {
     try {
@@ -110,6 +130,7 @@ export async function createSession(host: string, dir: string, name: string, kin
       const s = app.sessions.find((x) => x.key === target.key) ?? target;
       for (const w of s.windows) w.active = w.id === id;
       terminals.open(s);
+      return s.key;
     } catch (e) {
       toast(String(e), true);
     }
@@ -139,8 +160,90 @@ export async function createSession(host: string, dir: string, name: string, kin
         windows: [],
       } as Session);
     terminals.open(s);
+    return key;
   } catch (e) {
     toast(String(e), true);
+  }
+}
+
+// Saved sessions: [[saved]] in config.toml.
+
+export const savedSessions = (): SavedSession[] => app.config?.saved ?? [];
+
+const sameName = (a: string, b: string) => a.trim().toLocaleLowerCase() === b.trim().toLocaleLowerCase();
+
+export function findSaved(host: string, name: string): SavedSession | undefined {
+  return savedSessions().find((x) => x.host === host && sameName(x.name, name));
+}
+
+/** A session (or tmux window) of this name is already running on its host. */
+export function isSavedRunning(sv: SavedSession): boolean {
+  return visibleRows().some((r) => r.s.host === sv.host && !r.s.ended && sameName(rowName(r), sv.name));
+}
+
+/** Adds a saved session, replacing `replacing` and any of the same name on the same host. */
+export async function saveSession(sv: SavedSession, replacing?: SavedSession) {
+  const list = savedSessions().filter((x) => x !== replacing && !(x.host === sv.host && sameName(x.name, sv.name)));
+  // Saving is not a request to start it now, whatever its autostart says.
+  autoTried.add(autoId(sv));
+  try {
+    await api.setSaved([...list, sv]);
+    toast(`Saved "${sv.name}". Start it again from the palette: Start saved sessions`);
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
+export async function removeSaved(sv: SavedSession) {
+  try {
+    await api.setSaved(savedSessions().filter((x) => x !== sv));
+    toast(`Removed saved session "${sv.name}"`);
+  } catch (e) {
+    toast(String(e), true);
+  }
+}
+
+/** Starts one saved session and types its commands. False if it did not start. */
+async function startOne(sv: SavedSession): Promise<boolean> {
+  const key = await createSession(sv.host, sv.cwd, sv.name, sv.kind === "claude" ? "claude" : "shell");
+  if (!key) return false;
+  const lines = sv.commands.filter((c) => c.trim());
+  if (lines.length) terminals.runLines(key, lines);
+  return true;
+}
+
+/** Starts the given saved sessions, skipping those already running. */
+export async function startSaved(list: SavedSession[]) {
+  app.overlay = null;
+  let started = 0;
+  let running = 0;
+  for (const sv of list) {
+    if (isSavedRunning(sv)) running++;
+    else if (await startOne(sv)) started++;
+  }
+  const parts: string[] = [];
+  if (started) parts.push(`Started ${started}`);
+  if (running) parts.push(`${running} already running`);
+  if (parts.length) toast(parts.join(", "));
+}
+
+/** "host/name" of saved sessions autostart has dealt with in this window. */
+const autoTried = new Set<string>();
+const autoId = (sv: SavedSession) => `${sv.host}/${sv.name.trim().toLocaleLowerCase()}`;
+
+/** Starts autostart sessions once per window, as each host becomes usable.
+ *  Called whenever hosts or config change. */
+export function autostartSaved() {
+  for (const sv of savedSessions()) {
+    if (!sv.autostart || autoTried.has(autoId(sv))) continue;
+    const h = hostInfo(sv.host);
+    if (!h || !(isLive(h) || h.kind === "ephemeral")) continue;
+    autoTried.add(autoId(sv));
+    // Give the host's session list a moment to arrive, so a session that is
+    // still running (keeper sessions outlive the window) is not started twice.
+    setTimeout(() => {
+      if (!isSavedRunning(sv)) startOne(sv);
+    }, 2000);
   }
 }
 

@@ -69,6 +69,36 @@ pub struct HostEntry {
     pub auto_connect: bool,
 }
 
+/// A session to start again later (`[[saved]]` tables): after a reboot, say.
+/// Its commands are typed into the new session one line at a time.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct SavedSession {
+    pub name: String,
+    pub host: String,
+    /// "shell" or "claude".
+    pub kind: String,
+    pub cwd: String,
+    /// Typed in order; each waits for the one before to settle, so
+    /// `wsl` and then a command for the Linux shell works.
+    pub commands: Vec<String>,
+    /// Started when myterm starts, unless a session of that name is running.
+    pub autostart: bool,
+}
+
+impl Default for SavedSession {
+    fn default() -> Self {
+        SavedSession {
+            name: String::new(),
+            host: "local".into(),
+            kind: "shell".into(),
+            cwd: String::new(),
+            commands: vec![],
+            autostart: false,
+        }
+    }
+}
+
 impl Default for HostEntry {
     fn default() -> Self {
         HostEntry { name: String::new(), auto_connect: true }
@@ -103,6 +133,9 @@ pub struct Config {
     /// Shell for local sessions on Windows. Default: pwsh if installed, else powershell.
     pub local_shell: Option<String>,
     pub hosts: HashMap<String, HostOverride>,
+    /// Sessions to start again later (`[[saved]]` tables).
+    #[serde(rename = "saved", skip_serializing_if = "Vec::is_empty")]
+    pub saved: Vec<SavedSession>,
 }
 
 impl Default for Config {
@@ -153,6 +186,7 @@ impl Default for Config {
             mouse: true,
             local_shell: None,
             hosts: HashMap::new(),
+            saved: vec![],
         }
     }
 }
@@ -211,6 +245,19 @@ const CONFIG_TEMPLATE: &str = r##"# myterm settings. Changes are picked up autom
 # [theme]
 # background = "#16181d"
 # foreground = "#c8ccd4"
+
+# Saved sessions: started again from the palette ("Start saved sessions"),
+# or when myterm starts if autostart is on. Made by "Save session…" in a
+# session's right-click menu; hand edits work too. Each command is typed in
+# turn, waiting for the previous one's output to settle.
+#
+# [[saved]]
+# name = "api"
+# host = "local"
+# kind = "shell"
+# cwd = 'C:\dev\api'
+# commands = ["wsl", "cd ~/api && ./run.sh"]
+# autostart = true
 
 # Per-host overrides:
 # [hosts.my-server]
@@ -298,6 +345,47 @@ fn with_hosts(text: &str, list: &[HostEntry]) -> anyhow::Result<String> {
             arr.push(t);
         }
         doc["host"] = toml_edit::Item::ArrayOfTables(arr);
+    }
+    Ok(doc.to_string())
+}
+
+/// Writes the `[[saved]]` list, preserving the rest of the file.
+pub fn write_saved(list: &[SavedSession]) -> anyhow::Result<()> {
+    let path = config_path();
+    let _ = std::fs::create_dir_all(data_dir());
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| CONFIG_TEMPLATE.to_string());
+    std::fs::write(&path, with_saved(&text, list)?)?;
+    Ok(())
+}
+
+fn with_saved(text: &str, list: &[SavedSession]) -> anyhow::Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    doc.remove("saved");
+    if !list.is_empty() {
+        let mut arr = toml_edit::ArrayOfTables::new();
+        for (i, s) in list.iter().enumerate() {
+            let mut t = toml_edit::Table::new();
+            if i == 0 {
+                t.decor_mut().set_prefix(
+                    "
+# Saved sessions, started again from the palette (\"Start saved sessions\")
+                     # or at launch with autostart = true. commands are typed in turn.
+",
+                );
+            }
+            t["name"] = toml_edit::value(s.name.clone());
+            t["host"] = toml_edit::value(s.host.clone());
+            t["kind"] = toml_edit::value(s.kind.clone());
+            t["cwd"] = toml_edit::value(s.cwd.clone());
+            let mut cmds = toml_edit::Array::new();
+            for c in &s.commands {
+                cmds.push(c.clone());
+            }
+            t["commands"] = toml_edit::value(cmds);
+            t["autostart"] = toml_edit::value(s.autostart);
+            arr.push(t);
+        }
+        doc["saved"] = toml_edit::Item::ArrayOfTables(arr);
     }
     Ok(doc.to_string())
 }
@@ -434,6 +522,35 @@ mod tests {
         let c: Config = toml::from_str(&text).unwrap();
         assert_eq!(c.hosts["het1-ts"].tmux_path.as_deref(), Some("/x/tmux"));
         assert_eq!(c.host_list.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn writes_saved_keeping_the_rest() {
+        let s = SavedSession {
+            name: "api".into(),
+            host: "local".into(),
+            kind: "shell".into(),
+            cwd: r"C:\dev\api".into(),
+            commands: vec!["wsl".into(), "cd ~/api && ./run.sh \"x\"".into()],
+            autostart: true,
+        };
+        let start = "font_size = 14
+
+[[host]]
+name = \"local\"
+
+[hosts.intra]
+mouse = false
+";
+        let text = with_saved(start, &[s.clone()]).unwrap();
+        let c: Config = toml::from_str(&text).unwrap();
+        assert_eq!(c.font_size, 14.0);
+        assert_eq!(c.host_list.unwrap().len(), 1);
+        assert_eq!(c.hosts["intra"].mouse, Some(false));
+        assert_eq!(c.saved, vec![s]);
+        let text = with_saved(&text, &[]).unwrap();
+        assert!(toml::from_str::<Config>(&text).unwrap().saved.is_empty());
+        assert!(toml::from_str::<Config>(CONFIG_TEMPLATE).unwrap().saved.is_empty());
     }
 
     #[test]

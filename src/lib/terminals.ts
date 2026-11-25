@@ -37,7 +37,13 @@ interface Entry {
   early: string[];
   ack: number;
   ackTimer?: ReturnType<typeof setTimeout>;
+  /** When output last arrived, for waiting until a command settles. */
+  lastOutput: number;
+  /** Shell lines typed here, for "Save session…" (see `capture`). */
+  typed: { lines: string[]; cur: string; edited: boolean; skipped: number };
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const clipboardProvider: IClipboardProvider = {
   // Programs may set the clipboard through OSC 52, but never read it.
@@ -177,8 +183,13 @@ class TerminalManager {
       lastShown: Date.now(),
       early: [],
       ack: 0,
+      lastOutput: 0,
+      typed: { lines: [], cur: "", edited: false, skipped: 0 },
     };
-    term.onData((d) => this.send(e, d));
+    term.onData((d) => {
+      this.capture(e, d);
+      this.send(e, d);
+    });
     term.onResize(({ cols, rows }) => {
       if (e.pty !== null) api.resize(e.pty, cols, rows).catch(() => {});
     });
@@ -240,6 +251,70 @@ class TerminalManager {
     return true;
   }
 
+  /**
+   * Keeps the lines typed at a shell prompt, so "Save session…" can offer them.
+   * Only plain typing and Backspace are followed: a line that used history,
+   * Tab completion or cursor keys is not known for certain, so it is counted
+   * in `skipped` and left out. Nothing is kept while a full-screen program
+   * (an editor, Claude) has the alternate screen.
+   */
+  private capture(e: Entry, d: string) {
+    if (e.kind === "login" || e.term.buffer.active.type === "alternate") return;
+    const t = e.typed;
+    for (const ch of d.replace(/\x1b\[20[01]~/g, "")) {
+      if (ch === "\r" || ch === "\n") {
+        if (t.edited) t.skipped++;
+        else if (t.cur.trim() && t.lines.length < 50) t.lines.push(t.cur.trim());
+        t.cur = "";
+        t.edited = false;
+      } else if (ch === "\x7f" || ch === "\b") {
+        t.cur = [...t.cur].slice(0, -1).join("");
+      } else if (ch === "\x03" || ch === "\x15") {
+        // Ctrl+C, Ctrl+U: the line is abandoned.
+        t.cur = "";
+        t.edited = false;
+      } else if (ch < " ") {
+        t.edited = true;
+      } else {
+        t.cur += ch;
+      }
+    }
+  }
+
+  /** The shell lines typed in a terminal so far, and how many were left out. */
+  typedLines(key: string): { lines: string[]; skipped: number } {
+    const t = this.entries.get(key)?.typed;
+    return t ? { lines: [...t.lines], skipped: t.skipped } : { lines: [], skipped: 0 };
+  }
+
+  /**
+   * Types each line into a session, waiting for the shell to start and then
+   * for each command's output to settle before the next. Anything typed early
+   * waits in the console's input buffer, so `wsl` followed by a command for
+   * the Linux shell works even when WSL is slow to start.
+   */
+  async runLines(key: string, lines: string[]) {
+    const settle = async (min: number) => {
+      const start = Date.now();
+      for (;;) {
+        await sleep(100);
+        const e = this.entries.get(key);
+        if (!e) return false;
+        const now = Date.now();
+        if (now - start > 30000) return true;
+        if (e.pty !== null && !e.pendingInput && e.lastOutput && now - start >= min && now - e.lastOutput >= 800)
+          return true;
+      }
+    };
+    if (!(await settle(0))) return;
+    for (let i = 0; i < lines.length; i++) {
+      const e = this.entries.get(key);
+      if (!e) return;
+      this.send(e, lines[i] + "\r");
+      if (i < lines.length - 1 && !(await settle(1500))) return;
+    }
+  }
+
   private send(e: Entry, data: string) {
     if (e.pty !== null) api.write(e.pty, data).catch(() => {});
     else if (e.early.length < 64) e.early.push(data);
@@ -276,6 +351,7 @@ class TerminalManager {
       if (msg instanceof ArrayBuffer || ArrayBuffer.isView(msg)) {
         const bytes = msg instanceof ArrayBuffer ? new Uint8Array(msg) : new Uint8Array((msg as ArrayBufferView).buffer);
         const id = e.pty;
+        e.lastOutput = Date.now();
         e.term.write(bytes, () => {
           if (id === null) return;
           e.ack += bytes.length;
@@ -397,7 +473,8 @@ class TerminalManager {
     this.connect(e);
   }
 
-  async openEphemeral(host: string, dir: string, name: string, kind: string) {
+  /** Starts an ephemeral session; returns its key, or nothing if it failed. */
+  async openEphemeral(host: string, dir: string, name: string, kind: string): Promise<string | undefined> {
     const tmp = `pending:${++this.seq}`;
     const e = this.create(tmp, "ephemeral", host, "");
     this.show(tmp);
@@ -415,6 +492,7 @@ class TerminalManager {
       this.entries.set(r.key, e);
       this.setStatus(r.key, "live");
       if (app.active === tmp) this.show(r.key);
+      return r.key;
     } catch (err) {
       this.dispose(tmp);
       toast(String(err), true);

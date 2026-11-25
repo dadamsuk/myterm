@@ -16,6 +16,18 @@ export interface HostEntry {
   auto_connect: boolean;
 }
 
+/** One `[[saved]]` entry in config.toml: a session to start again later. */
+export interface SavedSession {
+  name: string;
+  host: string;
+  kind: "claude" | "shell";
+  cwd: string;
+  /** Typed in turn, each after the previous one's output settles. */
+  commands: string[];
+  /** Started when myterm starts, unless one of that name is running. */
+  autostart: boolean;
+}
+
 export interface Config {
   font_family: string;
   font_size: number;
@@ -30,6 +42,7 @@ export interface Config {
   notify_permission: boolean;
   mouse: boolean;
   local_shell: string | null;
+  saved?: SavedSession[];
 }
 
 export interface HostInfo {
@@ -159,6 +172,7 @@ export const api = {
   attachCommandText: (host: string, slug: string) => invoke<string>("attach_command_text", { host, slug }),
   reconnectHost: (host: string) => invoke<void>("reconnect_host", { host }),
   setHosts: (hosts: HostEntry[]) => invoke<void>("set_hosts", { hosts }),
+  setSaved: (saved: SavedSession[]) => invoke<void>("set_saved", { saved }),
   sshAliases: () => invoke<string[]>("ssh_aliases"),
   hooksPlan: (host: string, install: boolean) => invoke<HookPlan>("hooks_plan", { host, install }),
   hooksApply: (host: string, install: boolean) => invoke<void>("hooks_apply", { host, install }),

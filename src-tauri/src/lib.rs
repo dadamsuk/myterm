@@ -192,6 +192,13 @@ fn set_hosts(app: State<Arc<App>>, hosts: Vec<config::HostEntry>) -> R<()> {
 }
 
 #[tauri::command]
+fn set_saved(app: State<Arc<App>>, saved: Vec<config::SavedSession>) -> R<()> {
+    config::write_saved(&saved).map_err(err)?;
+    reload_config(app.inner());
+    Ok(())
+}
+
+#[tauri::command]
 fn ssh_aliases(app: State<Arc<App>>) -> Vec<String> {
     app.ssh_aliases()
 }
@@ -467,6 +474,7 @@ pub fn run() {
             drop_files,
             reconnect_host,
             set_hosts,
+            set_saved,
             ssh_aliases,
             hooks_plan,
             hooks_apply,

@@ -427,6 +427,15 @@ A version mismatch between client and keeper shows on the host heading; the prot
 
 Still unverified: the scheduled-task bootstrap for a non-administrator user; what happens to a WMI-started keeper at logoff; repaint on older inbox ConPTYs (Windows 10, Server 2019/2022), so the keeper should report the Windows build in `version`; remote network shares from a WMI keeper.
 
+### 14.2 Saved sessions
+
+**Goal.** Long-running jobs kept in a session (a dev server, a worker in WSL) can be started again after a reboot with one command, without turning them into system services.
+
+- A saved session is a `[[saved]]` table in `config.toml`: `name`, `host`, `kind`, `cwd`, `commands` (lines typed in turn) and `autostart`. "Save session…" in a row's right-click menu or the palette writes it; hand edits work too.
+- The dialog fills `commands` from the lines typed at the shell prompt in that terminal since it opened. Only plain typing and Backspace are followed; a line that used history, Tab completion or cursor keys is left out and counted, and the dialog says so. Nothing is recorded while a program has the alternate screen. The record stays in memory only; nothing is written until the user saves.
+- Starting one creates the session as "New session" would, then types each command once the output has been quiet for 0.8 s (at least 1.5 s after the previous command, at most 30 s). Typing early is safe, as input waits in the console's buffer; so `wsl` followed by a command for the Linux shell works.
+- "Start saved sessions" starts every saved session not already running; "running" means a session or tmux window of that name (case-insensitive) on that host. `autostart = true` does the same once per window when the host first becomes usable, 2 s later so the host's session list has arrived and a keeper session that outlived the window is not started twice.
+
 ## 15. Resolved questions
 
 1. Sessions created by the app hide the tmux status bar (section 5.5); configurable.

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { HostInfo } from "../lib/api";
+  import type { HostInfo, SavedSession } from "../lib/api";
   import {
     activeRow,
     app,
@@ -15,7 +15,10 @@
   } from "../lib/store.svelte";
   import {
     copyAttachCommand,
+    isSavedRunning,
     killRow,
+    savedSessions,
+    startSaved,
     openSettings,
     manageHosts,
     peekSidebar,
@@ -44,6 +47,23 @@
     step = {
       title,
       items: list.map((r) => ({ label: rowName(r), detail: `${r.s.host} · ${rowCwd(r)}`, run: () => act(r) })),
+    };
+  }
+
+  function pickSaved(title: string, act: (sv: SavedSession) => void) {
+    const list = savedSessions();
+    if (!list.length) {
+      app.overlay = null;
+      toast("No saved sessions yet: right-click a session and choose Save session…");
+      return;
+    }
+    step = {
+      title,
+      items: list.map((sv) => ({
+        label: sv.name,
+        detail: `${sv.host} · ${sv.cwd || "~"}${sv.commands.length ? " · " + sv.commands.join(" ; ") : ""}${isSavedRunning(sv) ? " · running" : ""}`,
+        run: () => act(sv),
+      })),
     };
   }
 
@@ -84,6 +104,28 @@
         else toast("No tmux session on screen", true);
       },
     },
+    {
+      label: "Save session…",
+      detail: "the one on screen, to start again later",
+      run: () => {
+        const r = activeRow();
+        if (r) app.overlay = { kind: "save", row: r };
+        else pickRow("Save which?", (x) => (app.overlay = { kind: "save", row: x }));
+      },
+    },
+    {
+      label: "Start saved sessions",
+      detail: "all that are not running",
+      run: () => {
+        const list = savedSessions();
+        if (!list.length) {
+          done();
+          toast("No saved sessions yet: right-click a session and choose Save session…");
+        } else startSaved(list);
+      },
+    },
+    { label: "Start saved session…", run: () => pickSaved("Start which?", (sv) => startSaved([sv])) },
+    { label: "Edit saved session…", detail: "commands, autostart, remove", run: () => pickSaved("Edit which?", (sv) => (app.overlay = { kind: "save", saved: sv })) },
     { label: "Group by machine", run: () => { setListMode("machine"); done(); } },
     { label: "Sort by name", run: () => { setListMode("name"); done(); } },
     { label: "Sort by recent", run: () => { setListMode("recent"); done(); } },
