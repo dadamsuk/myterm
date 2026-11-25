@@ -10,6 +10,7 @@
 mod conpty;
 mod ctrlc;
 mod harness;
+mod raw;
 mod repaint;
 mod win;
 
@@ -80,6 +81,7 @@ fn main() -> Result<()> {
         "repaint" => repaint::run(rest),
         "harness" => harness::run(rest),
         "ctrlc" => ctrlc::run(rest),
+        "raw" => raw::run(rest),
         "whoami" => {
             println!("{}", serde_json::to_string_pretty(&win::identity())?);
             Ok(())

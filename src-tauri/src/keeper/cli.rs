@@ -328,7 +328,14 @@ mod console {
             GetConsoleMode(stdout(), &mut o);
             SetConsoleMode(
                 stdin(),
-                (i & !(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT_MODE))
+                // No ENABLE_MOUSE_INPUT: with it, the ConPTY this runs in turns on
+                // mouse tracking in the terminal (?1003;1006h), so a drag no
+                // longer selects text there, and the mouse records were dropped.
+                (i & !(ENABLE_PROCESSED_INPUT
+                    | ENABLE_LINE_INPUT
+                    | ENABLE_ECHO_INPUT
+                    | ENABLE_QUICK_EDIT_MODE
+                    | ENABLE_MOUSE_INPUT))
                     | ENABLE_VIRTUAL_TERMINAL_INPUT
                     | ENABLE_WINDOW_INPUT
                     | ENABLE_EXTENDED_FLAGS,
