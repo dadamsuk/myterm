@@ -70,6 +70,8 @@
     position: absolute;
     inset: 0;
     overflow: hidden;
+    /* Keeps xterm's z-indexed layers (link canvas, helpers) below the overlays. */
+    isolation: isolate;
   }
   .welcome {
     position: absolute;
