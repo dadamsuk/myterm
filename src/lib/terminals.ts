@@ -123,7 +123,8 @@ class TerminalManager {
     return [...this.entries.keys()];
   }
 
-  private create(key: string, kind: Kind, host: string, slug: string): Entry {
+  /** `scroll`: keep scrollback here. tmux keeps its own; a keeper's ConPTY keeps none. */
+  private create(key: string, kind: Kind, host: string, slug: string, scroll = kind !== "tmux"): Entry {
     const cfg = app.config;
     const term = new Terminal({
       allowProposedApi: true,
@@ -133,7 +134,7 @@ class TerminalManager {
       theme: themeOf(cfg),
       cursorBlink: false,
       // tmux owns scrollback for tmux sessions.
-      scrollback: kind === "tmux" ? 0 : 10000,
+      scrollback: scroll ? 10000 : 0,
       macOptionClickForcesSelection: true,
       // Shift+drag does a native selection while tmux has the mouse.
       altClickMovesCursor: false,
@@ -141,7 +142,7 @@ class TerminalManager {
     const fit = new FitAddon();
     term.loadAddon(fit);
     const el = document.createElement("div");
-    el.className = "term" + (kind === "tmux" ? " no-scrollbar" : "");
+    el.className = "term" + (scroll ? "" : " no-scrollbar");
     el.style.display = "none";
     this.container?.appendChild(el);
     term.open(el);
@@ -374,7 +375,7 @@ class TerminalManager {
         toast("This ephemeral session belongs to a previous window", true);
         return;
       }
-      e = this.create(s.key, "tmux", s.host, s.slug);
+      e = this.create(s.key, "tmux", s.host, s.slug, hostInfo(s.host)?.kind === "keeper");
       this.show(s.key);
       this.connect(e);
     } else {

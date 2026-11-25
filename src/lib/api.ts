@@ -34,7 +34,7 @@ export interface Config {
 
 export interface HostInfo {
   alias: string;
-  kind: "tmux" | "ephemeral" | "unavailable";
+  kind: "tmux" | "keeper" | "ephemeral" | "unavailable";
   connected: boolean;
   connecting: boolean;
   status: string;

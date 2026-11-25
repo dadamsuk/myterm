@@ -2,6 +2,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { api, type HostEntry, type HostInfo, type Session, type Window } from "./api";
 import { app, hostInfo, isReachable, setSidebar, setSidebarAutoHide, toast, windowTarget, type Row } from "./store.svelte";
 import { terminals } from "./terminals";
+import { isLive } from "./hostdot";
 
 export function activate(s: Session) {
   app.overlay = null;
@@ -99,7 +100,7 @@ export async function createSession(host: string, dir: string, name: string, kin
     await terminals.openEphemeral(host, dir, name, kind);
     return;
   }
-  if (h.kind !== "tmux" || !h.connected) return toast(`${host} is not available: ${h.status}`, true);
+  if (!isLive(h)) return toast(`${host} is not available: ${h.status}`, true);
   const target = windowTarget(host);
   if (target) {
     try {

@@ -101,7 +101,7 @@
       run: () =>
         pickHost(
           "Install hooks on which host?",
-          shown().filter((h) => (h.kind === "tmux" && h.connected) || (h.local && h.kind === "ephemeral")),
+          shown().filter((h) => (h.kind === "tmux" && h.connected) || (h.local && (h.kind === "ephemeral" || h.kind === "keeper"))),
           (h) => (app.overlay = { kind: "hooks", host: h.alias, install: true }),
         ),
     },

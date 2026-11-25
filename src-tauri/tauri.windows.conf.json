@@ -2,7 +2,8 @@
   "bundle": {
     "resources": {
       "conpty/conpty.dll": "conpty.dll",
-      "conpty/OpenConsole.exe": "OpenConsole.exe"
+      "conpty/OpenConsole.exe": "OpenConsole.exe",
+      "target/release/myterm-cli.exe": "myterm-cli.exe"
     }
   }
 }

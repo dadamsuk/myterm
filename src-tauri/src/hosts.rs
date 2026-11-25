@@ -3,6 +3,8 @@
 use crate::channel::{self, q, Channel, Probe, Target};
 use crate::config::{self, now_secs, Config, State};
 use crate::hooks;
+use crate::keeper::client::KeeperConn;
+use crate::keeper::KSession;
 use crate::pty::PtyManager;
 use crate::sshconfig;
 use crate::tmux::{self, ListResult, Session};
@@ -23,7 +25,7 @@ const CMD_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
 pub struct HostInfo {
     pub alias: String,
-    /// "tmux" | "ephemeral" | "unavailable"
+    /// "tmux" | "keeper" | "ephemeral" | "unavailable"
     pub kind: String,
     pub connected: bool,
     pub connecting: bool,
@@ -49,6 +51,10 @@ pub struct Host {
     pub is_local: bool,
     pub info: Mutex<HostInfo>,
     pub channel: Mutex<Option<Arc<Channel>>>,
+    /// Control connection to a Windows keeper (14.1), when the host has one.
+    pub keeper: Mutex<Option<Arc<KeeperConn>>>,
+    /// Remote keeper hosts: the shell words that run myterm-cli there.
+    pub keeper_cli: Mutex<Option<String>>,
     pub sessions: Mutex<Vec<Session>>,
     pub wake: Notify,
     pub removed: AtomicBool,
@@ -217,6 +223,9 @@ impl App {
                 if let Some(c) = h.channel.lock().unwrap().take() {
                     c.kill();
                 }
+                if let Some(k) = h.keeper.lock().unwrap().take() {
+                    k.kill();
+                }
                 h.wake.notify_one();
             }
             keep
@@ -254,6 +263,8 @@ impl App {
                     ..Default::default()
                 }),
                 channel: Mutex::new(None),
+                keeper: Mutex::new(None),
+                keeper_cli: Mutex::new(None),
                 sessions: Mutex::new(vec![]),
                 wake: Notify::new(),
                 removed: AtomicBool::new(false),
@@ -336,6 +347,10 @@ impl App {
             .ok_or_else(|| anyhow!("{} is not connected", h.alias))
     }
 
+    fn keeper_of(&self, h: &Host) -> Option<Arc<KeeperConn>> {
+        h.keeper.lock().unwrap().clone().filter(|k| !k.is_dead())
+    }
+
     fn tmux_of(&self, h: &Host) -> Result<String> {
         h.info.lock().unwrap().tmux.clone().ok_or_else(|| anyhow!("no tmux on {}", h.alias))
     }
@@ -350,6 +365,13 @@ impl App {
 
     /// Re-polls a host right away so the list reflects a change without waiting.
     async fn refresh(&self, h: &Host) {
+        if let Some(k) = self.keeper_of(h) {
+            if let Ok(list) = k.list().await {
+                *h.sessions.lock().unwrap() = list.iter().map(|s| keeper_session(&h.alias, s)).collect();
+                self.emit_snapshot();
+            }
+            return;
+        }
         if let (Ok(c), Ok(t)) = (self.chan(h), self.tmux_of(h)) {
             if let Ok(r) = c.run(&tmux::list_script(&t), CMD_TIMEOUT).await {
                 if let ListResult::Sessions(s) = tmux::parse_list(&h.alias, r.code, &r.out) {
@@ -364,6 +386,17 @@ impl App {
 
     pub async fn create_session(&self, host: &str, dir: &str, name: &str, kind: &str) -> Result<String> {
         let h = self.host(host)?;
+        if let Some(k) = self.keeper_of(&h) {
+            let shell = if h.is_local { self.cfg().local_shell } else { None };
+            let req = serde_json::json!({ "op": "create", "name": name, "kind": kind, "cwd": dir.trim(), "shell": shell });
+            let v = k.request(req, CMD_TIMEOUT).await?;
+            let id = v["id"].as_str().ok_or_else(|| anyhow!("create failed"))?.to_string();
+            if !dir.trim().is_empty() {
+                self.touch_folder(host, dir.trim());
+            }
+            self.refresh(&h).await;
+            return Ok(id);
+        }
         let home = h.info.lock().unwrap().home.clone().unwrap_or_default();
         let dir = tmux::expand_home(dir.trim(), &home);
         let dir = if dir.is_empty() { home.clone() } else { dir };
@@ -424,6 +457,11 @@ impl App {
             return Ok(());
         }
         let h = self.host(host)?;
+        if let Some(k) = self.keeper_of(&h) {
+            k.request(serde_json::json!({ "op": "rename", "id": slug, "name": name }), CMD_TIMEOUT).await?;
+            self.refresh(&h).await;
+            return Ok(());
+        }
         let t = self.tmux_of(&h)?;
         self.run(&h, &tmux::rename_script(&t, slug, name)).await?;
         self.refresh(&h).await;
@@ -438,6 +476,13 @@ impl App {
             return Ok(()); // the frontend closes the PTY
         }
         let h = self.host(host)?;
+        if let Some(k) = self.keeper_of(&h) {
+            k.request(serde_json::json!({ "op": "kill", "id": slug }), CMD_TIMEOUT).await?;
+            // The keeper drops the session once its process has exited.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            self.refresh(&h).await;
+            return Ok(());
+        }
         let t = self.tmux_of(&h)?;
         self.run(&h, &tmux::kill_script(&t, slug)).await?;
         self.refresh(&h).await;
@@ -478,6 +523,15 @@ impl App {
 
     pub fn attach_command_text(&self, host: &str, slug: &str) -> Result<String> {
         let h = self.host(host)?;
+        if h.info.lock().unwrap().kind == "keeper" {
+            return Ok(if h.is_local {
+                let argv: Vec<String> = local_cli_argv().iter().map(|a| format!("\"{a}\"")).collect();
+                format!("{} attach {slug}", argv.join(" "))
+            } else {
+                let cli = h.keeper_cli.lock().unwrap().clone().unwrap_or_default();
+                format!("ssh -t {host} {}", q(&format!("{cli} attach {slug}")))
+            });
+        }
         let t = self.tmux_of(&h)?;
         let inner = format!("{} attach-session -t {}", q(&t), q(&format!("={slug}")));
         Ok(if h.is_local { inner } else { format!("ssh -t {host} {}", q(&inner)) })
@@ -486,6 +540,30 @@ impl App {
     /// Builds the PTY command that attaches to a tmux session (5.3).
     pub async fn attach_command(&self, host: &str, slug: &str) -> Result<CommandBuilder> {
         let h = self.host(host)?;
+        if h.info.lock().unwrap().kind == "keeper" {
+            let mut cmd = if h.is_local {
+                let argv = local_cli_argv();
+                let mut c = CommandBuilder::new(&argv[0]);
+                c.args(&argv[1..]);
+                c.args(["attach", slug]);
+                if let Some(home) = dirs::home_dir() {
+                    c.cwd(home);
+                }
+                c
+            } else {
+                let cli = h.keeper_cli.lock().unwrap().clone().ok_or_else(|| anyhow!("{host} has no keeper"))?;
+                let mut c = CommandBuilder::new("ssh");
+                c.arg("-t");
+                c.args(channel::SSH_OPTS);
+                c.arg(host);
+                c.arg(format!("{cli} attach {slug}"));
+                c
+            };
+            term_env(&mut cmd);
+            self.state.lock().unwrap().last_viewed.insert(format!("{host}/{slug}"), now_secs());
+            self.mark_state_dirty();
+            return Ok(cmd);
+        }
         let t = self.tmux_of(&h)?;
         let cfg = self.cfg();
         let mouse = cfg.hosts.get(host).and_then(|o| o.mouse).unwrap_or(cfg.mouse);
@@ -616,6 +694,9 @@ impl App {
         h.activated.store(true, Ordering::SeqCst);
         if let Some(c) = h.channel.lock().unwrap().take() {
             c.kill();
+        }
+        if let Some(k) = h.keeper.lock().unwrap().take() {
+            k.kill();
         }
         h.wake.notify_one();
         Ok(())
@@ -779,6 +860,175 @@ fn default_windows_shell() -> String {
     if in_path("pwsh.exe") { "pwsh.exe".into() } else { "powershell.exe".into() }
 }
 
+fn keeper_session(host: &str, k: &KSession) -> Session {
+    Session {
+        key: format!("{host}/{}", k.id),
+        host: host.to_string(),
+        slug: k.id.clone(),
+        display_name: k.name.clone(),
+        kind: k.kind.clone(),
+        cwd: k.cwd.clone(),
+        state: k.state.clone(),
+        state_at: k.state_at,
+        created: k.created,
+        last_attached: k.last_attached,
+        attached: k.attached,
+        persistent: true,
+        ephemeral_id: None,
+        ended: false,
+        windows: vec![],
+    }
+}
+
+/// How to run myterm-cli on this machine: the shipped myterm-cli.exe next to
+/// the app, or in debug builds (console programs) the app itself with --cli.
+pub fn local_cli_argv() -> Vec<String> {
+    let me = std::env::current_exe().unwrap_or_default();
+    let cli = me.with_file_name("myterm-cli.exe");
+    if cli.is_file() {
+        vec![cli.to_string_lossy().into_owned()]
+    } else {
+        vec![me.to_string_lossy().into_owned(), "--cli".into()]
+    }
+}
+
+/// The words that run `argv` from a Windows host's default shell.
+fn shell_words(argv: &[String], powershell: bool) -> String {
+    if powershell {
+        let quoted: Vec<String> = argv.iter().map(|a| format!("'{}'", a.replace('\'', "''"))).collect();
+        format!("& {}", quoted.join(" "))
+    } else {
+        let quoted: Vec<String> = argv.iter().map(|a| format!("\"{}\"", a.replace('"', ""))).collect();
+        quoted.join(" ")
+    }
+}
+
+/// Starts (if needed) and connects to this machine's keeper. A keeper from
+/// another version with no sessions is replaced by this version's.
+#[cfg(windows)]
+async fn local_keeper() -> Result<KeeperConn> {
+    use crate::keeper::{cli, server, PROTO, VERSION};
+    server::update_info(serde_json::json!({ "cli": local_cli_argv() }));
+    cli::ensure_keeper().await?;
+    let conn = KeeperConn::local().await?;
+    if conn.hello.version == VERSION && conn.hello.proto == PROTO {
+        return Ok(conn);
+    }
+    if conn.list().await.is_ok_and(|l| l.is_empty()) {
+        let _ = conn.request(serde_json::json!({ "op": "shutdown" }), Duration::from_secs(5)).await;
+        drop(conn);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        cli::ensure_keeper().await?;
+        return KeeperConn::local().await;
+    }
+    if conn.hello.proto != PROTO {
+        bail!("the running keeper (v{}) is incompatible; end its sessions to update it", conn.hello.version);
+    }
+    Ok(conn)
+}
+
+#[cfg(not(windows))]
+async fn local_keeper() -> Result<KeeperConn> {
+    bail!("no keeper on this platform")
+}
+
+/// Finds myterm on a Windows host (keeper.json, written by the app there) and
+/// opens a control channel to its keeper. Returns the connection and the
+/// shell words that run myterm-cli on that host.
+async fn remote_keeper(host: &str, powershell: bool) -> Result<(KeeperConn, String)> {
+    let read = if powershell {
+        r#"Get-Content -Raw "$env:LOCALAPPDATA\myterm\keeper.json""#
+    } else {
+        r#"type "%LOCALAPPDATA%\myterm\keeper.json""#
+    };
+    let mut cmd = channel::ssh_batch_command(host);
+    cmd.arg(read).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(15), cmd.output()).await??;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let json = text.find('{').map(|i| &text[i..]).unwrap_or("");
+    let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap_or_default();
+    let argv: Vec<String> = v["cli"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if argv.is_empty() {
+        bail!("myterm has not been run there");
+    }
+    let words = shell_words(&argv, powershell);
+    let conn = KeeperConn::ssh(host, &format!("{words} channel")).await?;
+    if conn.hello.proto != crate::keeper::PROTO {
+        conn.kill();
+        bail!("its keeper (v{}) is incompatible with this myterm", conn.hello.version);
+    }
+    Ok((conn, words))
+}
+
+fn keeper_status(k: &KeeperConn) -> String {
+    if k.hello.interactive {
+        "keeper".into()
+    } else {
+        // Started through WMI over ssh while nobody was logged on at the desktop.
+        "keeper, outside the desktop logon: saved logins and network shares unavailable".into()
+    }
+}
+
+/// Polls a keeper's sessions until the connection drops.
+async fn keeper_loop(app: &Arc<App>, h: &Arc<Host>, k: Arc<KeeperConn>) {
+    *h.keeper.lock().unwrap() = Some(k.clone());
+    let hello = k.hello.clone();
+    let status = keeper_status(&k);
+    let local_hooks = h.is_local.then(local_hooks_installed);
+    app.set_info(h, |i| {
+        i.kind = "keeper".into();
+        i.connected = true;
+        i.connecting = false;
+        i.needs_login = false;
+        i.os = "Windows".into();
+        i.status = status;
+        i.home = Some(hello.home.clone());
+        i.user = (!hello.user.is_empty()).then(|| hello.user.clone());
+        if let Some(installed) = local_hooks {
+            i.hooks_installed = installed;
+        }
+    });
+    loop {
+        match k.list().await {
+            Ok(list) => {
+                let s: Vec<Session> = list.iter().map(|x| keeper_session(&h.alias, x)).collect();
+                let changed = *h.sessions.lock().unwrap() != s;
+                if changed {
+                    app.remember_folders(&h.alias, &s);
+                    *h.sessions.lock().unwrap() = s;
+                    app.emit_snapshot();
+                }
+            }
+            Err(_) => break,
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = h.wake.notified() => {}
+        }
+        if k.is_dead() || h.removed.load(Ordering::SeqCst) {
+            break;
+        }
+    }
+    k.kill();
+    *h.keeper.lock().unwrap() = None;
+    if !h.removed.load(Ordering::SeqCst) {
+        app.set_info(h, |i| {
+            i.kind = "unavailable".into();
+            i.connected = false;
+            i.status = "connection lost".into();
+        });
+    }
+}
+
+fn local_hooks_installed() -> bool {
+    dirs::home_dir()
+        .and_then(|d| std::fs::read_to_string(d.join(".claude").join("settings.json")).ok())
+        .is_some_and(|s| hooks::is_installed(&s))
+}
+
 fn eph_state_dir() -> std::path::PathBuf {
     dirs::home_dir().unwrap_or_default().join(".myterm").join("state")
 }
@@ -914,16 +1164,32 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
         app.set_info(&h, |i| i.dormant = false);
         if h.is_local && local_is_windows() {
             app.set_info(&h, |i| {
-                i.kind = "ephemeral".into();
-                i.connected = true;
-                i.connecting = false;
-                i.os = "Windows".into();
-                i.status = "this machine".into();
-                i.hooks_installed = dirs::home_dir()
-                    .and_then(|d| std::fs::read_to_string(d.join(".claude").join("settings.json")).ok())
-                    .is_some_and(|s| hooks::is_installed(&s));
+                i.connecting = true;
+                i.status = "starting keeper".into();
             });
-            h.wake.notified().await;
+            match local_keeper().await {
+                Ok(k) => {
+                    attempt = 0;
+                    keeper_loop(&app, &h, Arc::new(k)).await;
+                    if h.removed.load(Ordering::SeqCst) {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    // As in v1: sessions live in the app's own PTYs.
+                    app.set_info(&h, |i| {
+                        i.kind = "ephemeral".into();
+                        i.connected = true;
+                        i.connecting = false;
+                        i.os = "Windows".into();
+                        i.status = format!("this machine (keeper unavailable: {e})");
+                        i.hooks_installed = local_hooks_installed();
+                    });
+                    h.wake.notified().await;
+                    continue;
+                }
+            }
+            backoff(&h, &mut attempt).await;
             continue;
         }
         app.set_info(&h, |i| {
@@ -1017,14 +1283,28 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
                     config::HostCache { kind: "windows".into(), tmux_path: None, os: Some("Windows".into()) },
                 );
                 app.mark_state_dirty();
+                app.set_info(&h, |i| i.win_powershell = powershell);
+                let why = match remote_keeper(&h.alias, powershell).await {
+                    Ok((k, words)) => {
+                        attempt = 0;
+                        *h.keeper_cli.lock().unwrap() = Some(words);
+                        keeper_loop(&app, &h, Arc::new(k)).await;
+                        if h.removed.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        backoff(&h, &mut attempt).await;
+                        continue;
+                    }
+                    Err(e) => e.to_string(),
+                };
                 app.set_info(&h, |i| {
                     i.kind = "ephemeral".into();
                     i.connected = true;
                     i.connecting = false;
                     i.needs_login = false;
                     i.os = "Windows".into();
-                    i.win_powershell = powershell;
-                    i.status = if powershell { "Windows (PowerShell)".into() } else { "Windows (cmd)".into() };
+                    let shell = if powershell { "PowerShell" } else { "cmd" };
+                    i.status = format!("Windows ({shell}); no keeper: {why}");
                 });
                 attempt = 0;
                 // Nothing to poll; wait for an explicit reconnect.
@@ -1050,11 +1330,16 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
                 });
             }
         }
-        let wait = BACKOFF[attempt.min(BACKOFF.len() - 1)];
-        attempt += 1;
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
-            _ = h.wake.notified() => { attempt = 0; }
-        }
+        backoff(&h, &mut attempt).await;
+    }
+}
+
+/// Waits before the next connection attempt; a wake (click) cuts it short.
+async fn backoff(h: &Host, attempt: &mut usize) {
+    let wait = BACKOFF[(*attempt).min(BACKOFF.len() - 1)];
+    *attempt += 1;
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
+        _ = h.wake.notified() => { *attempt = 0; }
     }
 }

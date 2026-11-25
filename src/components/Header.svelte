@@ -17,7 +17,7 @@
 
   let conn = $derived.by(() => {
     if (!term) return "";
-    if (term.status === "live") return host?.kind === "tmux" && !host.connected ? "host channel down" : "connected";
+    if (term.status === "live") return (host?.kind === "tmux" || host?.kind === "keeper") && !host.connected ? "host channel down" : "connected";
     return term.status;
   });
 </script>

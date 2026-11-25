@@ -20,7 +20,7 @@
     type Row,
   } from "../lib/store.svelte";
   import { activateRow, hostAction, manageHosts, openSettings, removeHost, toggleAutoHide, toggleSidebar } from "../lib/actions";
-  import { hostColor, hostStatus } from "../lib/hostdot";
+  import { hostColor, hostStatus, isLive } from "../lib/hostdot";
 
   let { floating = false }: { floating?: boolean } = $props();
   import { label } from "../lib/keys";
@@ -122,12 +122,12 @@
             <span class="hdot {hostColor(g.host)}"></span>
           {/if}
           <span class="gtitle">{g.title}</span>
-          {#if g.host && !(g.host.kind === "tmux" && g.host.connected)}
+          {#if g.host && !isLive(g.host)}
             <button class="hstatus" title={g.host.status} onclick={() => g.host && hostAction(g.host)}>
               {g.host.dormant ? "connect" : g.host.needs_login ? "log in" : g.host.kind === "ephemeral" ? "ephemeral" : g.host.status}
             </button>
           {/if}
-          {#if g.host && ((g.host.kind === "tmux" && g.host.connected) || g.host.kind === "ephemeral")}
+          {#if g.host && (isLive(g.host) || g.host.kind === "ephemeral")}
             {@const alias = g.host.alias}
             <button
               class="add"

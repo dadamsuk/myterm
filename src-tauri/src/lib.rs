@@ -1,8 +1,9 @@
 mod channel;
 mod config;
-mod files;
+pub(crate) mod files;
 mod hooks;
 mod hosts;
+pub mod keeper;
 #[cfg(test)]
 mod live_test;
 mod pty;

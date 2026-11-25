@@ -119,6 +119,13 @@ impl App {
         if data.len() > MAX_UPLOAD {
             bail!("{name} is larger than {} MB", MAX_UPLOAD / 1024 / 1024);
         }
+        // Windows hosts with a keeper write it into their %TEMP%\myterm.
+        let keeper = h.keeper.lock().unwrap().clone().filter(|k| !k.is_dead());
+        if let Some(k) = keeper {
+            let req = serde_json::json!({ "op": "upload", "name": name, "data": base64(data) });
+            let v = k.request(req, UPLOAD_TIMEOUT).await?;
+            return Ok(v["path"].as_str().unwrap_or_default().to_string());
+        }
         let chan = h
             .channel
             .lock()

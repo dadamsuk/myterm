@@ -1,3 +1,4 @@
+import { isLive } from "./hostdot";
 import type { Config, HostInfo, ListMode, Session, Window } from "./api";
 import { api } from "./api";
 
@@ -158,6 +159,7 @@ export function rowLastUsed(r: Row): number {
 
 /** True when a host has more than one tmux session, so rows name their session. */
 export function multiSession(host: string): boolean {
+  if (hostInfo(host)?.kind !== "tmux") return false;
   return app.sessions.filter((s) => s.host === host && s.persistent).length > 1;
 }
 
@@ -174,7 +176,7 @@ export function windowTarget(host: string): Session | undefined {
 export function isReachable(s: Session): boolean {
   const h = hostInfo(s.host);
   if (!s.persistent) return !s.ended;
-  return !!h && h.kind === "tmux" && h.connected;
+  return isLive(h);
 }
 
 export function basename(p: string): string {

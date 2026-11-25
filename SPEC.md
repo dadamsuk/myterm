@@ -19,7 +19,7 @@ The primary workload is long-running Claude Code sessions started with `--rc '<n
 | Transport | The system `ssh` binary, run in a local PTY. No SSH library |
 | Host list | A list in `config.toml`, managed from the Hosts dialog or by hand; names are ssh destinations (usually `~/.ssh/config` aliases), which keeps the connection details |
 | Persistence on macOS/Linux hosts | tmux, one tmux session per destination |
-| Persistence on Windows hosts | None in v1: sessions are "ephemeral". In v2 a keeper process inside the myterm install holds them (14.1) |
+| Persistence on Windows hosts | A keeper process inside the myterm install holds them (14.1); hosts without it fall back to v1's "ephemeral" sessions |
 | Local sessions | Yes; the local machine is just another host |
 | Needs-attention badges | In v1, driven by Claude Code hooks |
 | Quick switcher | Ctrl+Shift+O |
@@ -372,10 +372,12 @@ The main item is the Windows keeper (14.1). Other candidates: floating "previous
 | Process | Role |
 |---|---|
 | `myterm.exe --keeper` | Headless, one per user per machine. Owns every session's ConPTY and the control pipe. Creates its ConPTYs directly, not through portable-pty, with the inbox ConPTY and no creation flags (see "Verified" below). Started by the UI if not running; keeps running after the UI quits. Optional "start keeper at login" (HKCU `Run` key) keeps the machine reachable with no window open |
-| myterm UI | An ordinary pipe client of its local keeper. Local Windows sessions take the same path as remote ones, with no special case |
-| `myterm-cli.exe` | Small console-subsystem helper shipped as a Tauri sidecar, because the GUI-subsystem `myterm.exe` handles stdio poorly under ssh. Relays between its stdio and the keeper's pipe |
+| myterm UI | Lists, creates, renames and kills over the pipe (locally) or `myterm-cli channel` (remote). Attaching runs `myterm-cli attach <id>` in the UI's own PTY (over `ssh -t` for remote hosts), so keeper sessions take the same attach, reconnect and eviction path in the frontend as tmux sessions, and local sessions the same path as remote ones |
+| `myterm-cli.exe` | Small console-subsystem helper shipped next to `myterm.exe` (a bundle resource, built by `beforeBuildCommand`), because the GUI-subsystem `myterm.exe` handles stdio poorly under ssh. `channel` relays its stdio to the pipe, starting the keeper first if needed; `attach <id>` relays a console; `start`, `request <json>` and `version` are for diagnostics. Debug builds are console programs, so there `myterm.exe --cli …` does the same |
 
-The keeper creates the first pipe instance with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a second keeper fails to create it (access denied) and exits; pipe names are machine-global, so this works across the desktop and ssh logons and no separate mutex is needed. The keeper writes its pipe name and the `myterm-cli.exe` path to `%LOCALAPPDATA%\myterm\keeper.json` so ssh commands can find them.
+The keeper runs from a per-version copy, `%LOCALAPPDATA%\myterm\keeper\myterm-keeper-<version>.exe`, so an installer can replace `myterm.exe` while it runs. Each new session gets the user's default environment, built fresh from the registry (`CreateEnvironmentBlock`), plus `TERM`, `COLORTERM` and `MYTERM_SESSION`, rather than whatever environment started the keeper. On start the UI connects to its keeper; one of another version with no sessions is told to shut down and replaced.
+
+The keeper creates the first pipe instance with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a second keeper fails to create it (access denied) and exits; pipe names are machine-global, so this works across the desktop and ssh logons and no separate mutex is needed. The keeper writes its pipe name to `%LOCALAPPDATA%\myterm\keeper.json`, and the UI adds `cli` (the command words that run `myterm-cli`), so a client connecting over ssh reads that file (`type` or `Get-Content`, depending on the host's default shell) to find it. A Windows host where myterm has never been run has no such file and stays `ephemeral`.
 
 **Control pipe.** `\\.\pipe\myterm-keeper-<user SID>`, created with the DACL `D:P(A;;GA;;;<user SID>)` (the owning user only) and `PIPE_REJECT_REMOTE_CLIENTS`. Pipe names are machine-global, so a pipe created in the desktop logon can be reached from an ssh logon of the same user, and the other way round. No mandatory label is needed: a medium-integrity desktop client can open a pipe created by a high-integrity keeper. Requests are one JSON line each; replies are one JSON line, except `attach`, which switches the connection to a framed byte stream.
 
