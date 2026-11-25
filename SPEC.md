@@ -436,6 +436,35 @@ Still unverified: the scheduled-task bootstrap for a non-administrator user; wha
 - Starting one creates the session as "New session" would, then types each command once the output has been quiet for 0.8 s (at least 1.5 s after the previous command, at most 30 s). Typing early is safe, as input waits in the console's buffer; so `wsl` followed by a command for the Linux shell works.
 - "Start saved sessions" starts every saved session not already running; "running" means a session or tmux window of that name (case-insensitive) on that host. `autostart = true` does the same once per window when the host first becomes usable, 2 s later so the host's session list has arrived and a keeper session that outlived the window is not started twice.
 
+### 14.3 Take over from another machine
+
+**Goal.** At another of my computers, "Take over from…" in the palette, then picking the machine I was using, opens the same sessions in the same order with the same row and window on screen, and the other machine lets go. Nothing is copied ahead of time. The new machine asks the old one at the moment of the takeover.
+
+**Nothing moves.** Sessions stay where they run. Sessions on tmux hosts are attached as usual. The old machine's local sessions become remote sessions under that machine's host, with execution, files, environment and logins all staying there. So the old machine must be awake and reachable over ssh for its local sessions to come across. If it is not, the takeover brings what it can and says what it left out. Ephemeral sessions cannot be taken over and are listed as left behind. Scrollback of keeper sessions is only the current screen until the keeper keeps screen state (14.1).
+
+**The UI's own channel.** The running UI listens on a local-only channel with the keeper's protection rules: `\\.\pipe\myterm-ui-<user SID>` (owner-only DACL, `PIPE_REJECT_REMOTE_CLIENTS`) on Windows, and a `0600` Unix socket in the app's support folder on macOS. There is no network listener. ssh provides authentication and transport. `myterm-cli` gains:
+
+| Command | Effect |
+|---|---|
+| `ui state` | One JSON line: machine name (the hostname), time of the last keyboard input, the open sessions in order (host, slug, window), the row on screen, last-viewed times, known folders, and for each host the machine name it reported at bootstrap. When the UI is not running, the same is read from `state.json`, with no input time |
+| `ui release <taker>` | The UI closes every attach PTY and shows "Moved to *taker*" in place of the terminal, with a "Take it back" button that runs a takeover in the other direction. It does nothing when the UI is not running |
+
+This needs the view in `state.json`: the open sessions, their order and the row on screen are saved when they change, and also restored at start-up.
+
+**Picking the machine.** The palette's "Take over from…" lists every host in the host list where `myterm-cli` was found (keeper hosts, and macOS hosts where it is installed), other than this machine. When the list opens, `ui state` is asked of each one in parallel. Each row shows the machine, whether its UI is running, and how long ago it was last used, most recent first. Hosts that do not answer within 3 s are greyed out.
+
+**Mapping hosts.** Host names are those of the machine that answered, and `local` means that machine. The taker therefore maps:
+
+- `local` to the alias it used to reach the old machine;
+- any host whose reported machine name is the taker's own (case-insensitive) to `local`;
+- every other name as is. A host that is not in the taker's list is offered to be added, and its sessions are listed as left behind until it is.
+
+Last-viewed times and known folders are merged under the mapped names, the newer time winning, so `done` badges the old machine had cleared stay cleared. Host bootstrap records each host's machine name (`hostname`) in `state.json` for this. `config.toml` is not copied. Saved sessions, theme and keys stay per machine, so a `host = "local"` saved session never starts on the wrong machine.
+
+**Order.** (1) `ui state` from the chosen machine. (2) Connect any listed host that is not connected. (3) Open the sessions in order, up to the open-session cap, and select the row and window that was on screen. (4) `ui release <this machine>`. Release comes last, so a takeover that fails part-way leaves the old machine as it was.
+
+**Not included.** Moving a running session's process to the new machine. A later "Move here" for Claude sessions alone could copy the conversation from `~/.claude/projects/` and run `claude --resume`, provided the working copy on the new machine matches.
+
 ## 15. Resolved questions
 
 1. Sessions created by the app hide the tmux status bar (section 5.5); configurable.
