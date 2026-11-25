@@ -880,12 +880,16 @@ fn keeper_session(host: &str, k: &KSession) -> Session {
     }
 }
 
-/// How to run myterm-cli on this machine: the shipped myterm-cli.exe next to
-/// the app, or in debug builds (console programs) the app itself with --cli.
+/// How to run myterm-cli on this machine: a per-build copy of the shipped
+/// myterm-cli.exe next to the app (so ssh channels from other machines don't
+/// lock it against an update), or in debug builds (console programs) the app
+/// itself with --cli.
 pub fn local_cli_argv() -> Vec<String> {
     let me = std::env::current_exe().unwrap_or_default();
     let cli = me.with_file_name("myterm-cli.exe");
     if cli.is_file() {
+        #[cfg(windows)]
+        let cli = crate::keeper::cli::cli_copy(&cli);
         vec![cli.to_string_lossy().into_owned()]
     } else {
         vec![me.to_string_lossy().into_owned(), "--cli".into()]

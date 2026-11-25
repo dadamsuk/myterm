@@ -447,6 +447,9 @@ fn start_tray(k: &Arc<Keeper>) {
         quit: Box::new(move || {
             let all: Vec<Arc<Sess>> = k2.sessions.lock().unwrap().clone();
             log(format!("quit from the tray, ending {} sessions", all.len()));
+            // Until myterm is started here again, ssh channels from other
+            // machines must not start a new keeper (cli::ensure_keeper).
+            update_info(json!({ "quit_from_tray": crate::config::now_secs() }));
             for s in &all {
                 s.con.kill();
                 // Closing the pseudoconsole also ends programs still attached to it.

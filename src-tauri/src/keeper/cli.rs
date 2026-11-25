@@ -8,7 +8,7 @@
 //!   myterm-cli request JSON   send one request, print the reply (diagnostics)
 //!   myterm-cli version
 
-use super::server::{local_dir, pipe_name};
+use super::server::{local_dir, pipe_name, update_info};
 use super::{frame, resize_frame, FRAME_INPUT, VERSION};
 use anyhow::{anyhow, bail, Result};
 use serde_json::json;
@@ -68,12 +68,19 @@ pub fn main(args: &[String]) -> ! {
 /// while a keeper is running.
 pub fn keeper_exe() -> Result<PathBuf> {
     let me = std::env::current_exe()?;
-    let is_cli = me.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("myterm-cli"));
-    let src = if is_cli { me.with_file_name("myterm.exe") } else { me };
+    let is_cli = me.file_stem().is_some_and(|s| s.to_string_lossy().to_ascii_lowercase().starts_with("myterm-cli"));
+    let src = if !is_cli {
+        me
+    } else if me.with_file_name("myterm.exe").is_file() {
+        me.with_file_name("myterm.exe")
+    } else {
+        // Running from a copy (cli_copy): the app recorded where it is.
+        recorded_app().unwrap_or_else(|| me.with_file_name("myterm.exe"))
+    };
     if !src.is_file() {
         bail!("{} not found", src.display());
     }
-    super::server::update_info(json!({ "app": src.to_string_lossy() }));
+    update_info(json!({ "app": src.to_string_lossy() }));
     let dir = local_dir().join("keeper");
     std::fs::create_dir_all(&dir)?;
     let dst = dir.join(format!("myterm-keeper-{VERSION}.exe"));
@@ -83,6 +90,54 @@ pub fn keeper_exe() -> Result<PathBuf> {
         return Ok(src);
     }
     Ok(dst)
+}
+
+fn info() -> serde_json::Value {
+    std::fs::read_to_string(local_dir().join("keeper.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn recorded_app() -> Option<PathBuf> {
+    Some(PathBuf::from(info()["app"].as_str()?))
+}
+
+/// Set by the tray's Quit (server.rs), cleared by the next local start.
+fn quit_from_tray() -> bool {
+    info()["quit_from_tray"].as_u64().is_some()
+}
+
+/// The myterm-cli that ssh commands run: a copy of `src` under
+/// %LOCALAPPDATA%\myterm\cli named for this build, so a channel held open by
+/// another machine never locks the shipped (or freshly built) myterm-cli.exe.
+/// Copies from older builds are removed once nothing is running them.
+pub fn cli_copy(src: &std::path::Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let Ok(m) = std::fs::metadata(src) else { return src.to_path_buf() };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (m.len(), m.modified().ok()).hash(&mut h);
+    let dir = local_dir().join("cli");
+    let dst = dir.join(format!("myterm-cli-{VERSION}-{:08x}.exe", h.finish() as u32));
+    if dst.is_file() {
+        return dst;
+    }
+    let tmp = dst.with_extension("tmp");
+    let copied = std::fs::create_dir_all(&dir).is_ok()
+        && std::fs::copy(src, &tmp).is_ok()
+        && std::fs::rename(&tmp, &dst).is_ok();
+    if !copied {
+        let _ = std::fs::remove_file(&tmp);
+        return src.to_path_buf();
+    }
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            if e.path() != dst {
+                let _ = std::fs::remove_file(e.path()); // fails while still running: next time
+            }
+        }
+    }
+    dst
 }
 
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -168,8 +223,14 @@ pub async fn ensure_keeper() -> Result<()> {
     if ClientOptions::new().open(&pipe).is_ok() {
         return Ok(());
     }
+    let over_ssh = std::env::var_os("SSH_CONNECTION").is_some();
+    if over_ssh && quit_from_tray() {
+        bail!("the keeper was quit from the tray there; start myterm on that machine to start it again");
+    }
     let exe = keeper_exe()?;
-    if std::env::var_os("SSH_CONNECTION").is_none() {
+    if !over_ssh {
+        // Started here (the app, or myterm-cli at this desktop): a tray quit no longer holds.
+        update_info(json!({ "quit_from_tray": null }));
         spawn_detached(&exe)?;
         if wait_for_pipe(&pipe, Duration::from_secs(10)).await {
             return Ok(());
