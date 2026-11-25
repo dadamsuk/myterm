@@ -434,6 +434,34 @@ pub fn run() -> ! {
     std::process::exit(0)
 }
 
+/// The notification-area icon (tray.rs), for a keeper in the desktop logon.
+fn start_tray(k: &Arc<Keeper>) {
+    let (k1, k2) = (k.clone(), k.clone());
+    super::tray::spawn(super::tray::Hooks {
+        count: Box::new(move || k1.sessions.lock().unwrap().len()),
+        quit: Box::new(move || {
+            let all: Vec<Arc<Sess>> = k2.sessions.lock().unwrap().clone();
+            log(format!("quit from the tray, ending {} sessions", all.len()));
+            for s in &all {
+                s.con.kill();
+                // Closing the pseudoconsole also ends programs still attached to it.
+                s.con.close();
+                let _ = std::fs::remove_file(state_file(&s.id));
+            }
+            std::process::exit(0);
+        }),
+        // Written by the UI and by myterm-cli (cli::keeper_exe); the keeper itself
+        // runs from a copy, so its own path is no use.
+        app: Box::new(|| {
+            let text = std::fs::read_to_string(local_dir().join("keeper.json")).ok()?;
+            let v: Value = serde_json::from_str(&text).ok()?;
+            let p = PathBuf::from(v["app"].as_str()?);
+            p.is_file().then_some(p)
+        }),
+        log: |m| log(m),
+    });
+}
+
 async fn serve() -> Result<()> {
     let pipe = pipe_name();
     let sa = winsec::security_attributes(&format!("D:P(A;;GA;;;{})", winsec::user_sid()))?;
@@ -461,6 +489,9 @@ async fn serve() -> Result<()> {
     }));
     let base = (crate::config::now_secs() as u64) * 1000;
     let k = Arc::new(Keeper { sessions: Mutex::new(vec![]), next: AtomicU64::new(base) });
+    if h.interactive && h.session_id != 0 {
+        start_tray(&k);
+    }
     loop {
         server.connect().await?;
         let conn = server;

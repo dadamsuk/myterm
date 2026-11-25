@@ -15,6 +15,8 @@ mod conpty;
 #[cfg(windows)]
 pub mod server;
 #[cfg(windows)]
+mod tray;
+#[cfg(windows)]
 mod winsec;
 
 use serde::{Deserialize, Serialize};

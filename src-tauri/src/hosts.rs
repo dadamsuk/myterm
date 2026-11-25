@@ -908,7 +908,8 @@ fn shell_words(argv: &[String], powershell: bool) -> String {
 #[cfg(windows)]
 async fn local_keeper() -> Result<KeeperConn> {
     use crate::keeper::{cli, server, PROTO, VERSION};
-    server::update_info(serde_json::json!({ "cli": local_cli_argv() }));
+    let app = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    server::update_info(serde_json::json!({ "cli": local_cli_argv(), "app": app }));
     cli::ensure_keeper().await?;
     let conn = KeeperConn::local().await?;
     if conn.hello.version == VERSION && conn.hello.proto == PROTO {

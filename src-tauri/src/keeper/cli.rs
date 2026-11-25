@@ -73,6 +73,7 @@ pub fn keeper_exe() -> Result<PathBuf> {
     if !src.is_file() {
         bail!("{} not found", src.display());
     }
+    super::server::update_info(json!({ "app": src.to_string_lossy() }));
     let dir = local_dir().join("keeper");
     std::fs::create_dir_all(&dir)?;
     let dst = dir.join(format!("myterm-keeper-{VERSION}.exe"));
