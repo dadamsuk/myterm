@@ -8,6 +8,7 @@
 //!   whoami   print this process's identity
 
 mod conpty;
+mod ctrlc;
 mod harness;
 mod repaint;
 mod win;
@@ -78,6 +79,7 @@ fn main() -> Result<()> {
         "attach" => attach(rest),
         "repaint" => repaint::run(rest),
         "harness" => harness::run(rest),
+        "ctrlc" => ctrlc::run(rest),
         "whoami" => {
             println!("{}", serde_json::to_string_pretty(&win::identity())?);
             Ok(())

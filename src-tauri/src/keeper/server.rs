@@ -425,6 +425,11 @@ where
 /// Entry point for `myterm.exe --keeper`. Never returns.
 pub fn run() -> ! {
     open_log();
+    // The UI starts the keeper with CREATE_NEW_PROCESS_GROUP, which makes it
+    // ignore Ctrl+C, and every process it starts inherits that: Ctrl+C typed in
+    // a session reached the shell's line editor but never stopped a running
+    // program (ping, node, python). Turn it back on before any session starts.
+    unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0) };
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let r = rt.block_on(serve());
     if let Err(e) = r {

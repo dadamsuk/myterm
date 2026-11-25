@@ -68,7 +68,7 @@ pub fn which() -> &'static str {
 
 pub struct Con {
     hpc: usize,
-    process: usize,
+    pub process: usize,
     pub pid: u32,
     pub input: File,
     pub output: File,
