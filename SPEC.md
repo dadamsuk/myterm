@@ -371,13 +371,13 @@ The main item is the Windows keeper (14.1). Other candidates: floating "previous
 
 | Process | Role |
 |---|---|
-| `myterm.exe --keeper` | Headless, one per user per machine. Owns every session's ConPTY (reusing `pty.rs`) and the control pipe. Started by the UI if not running; keeps running after the UI quits. Optional "start keeper at login" (HKCU `Run` key) keeps the machine reachable with no window open |
+| `myterm.exe --keeper` | Headless, one per user per machine. Owns every session's ConPTY and the control pipe. Creates its ConPTYs directly, not through portable-pty, with the inbox ConPTY and no creation flags (see "Verified" below). Started by the UI if not running; keeps running after the UI quits. Optional "start keeper at login" (HKCU `Run` key) keeps the machine reachable with no window open |
 | myterm UI | An ordinary pipe client of its local keeper. Local Windows sessions take the same path as remote ones, with no special case |
 | `myterm-cli.exe` | Small console-subsystem helper shipped as a Tauri sidecar, because the GUI-subsystem `myterm.exe` handles stdio poorly under ssh. Relays between its stdio and the keeper's pipe |
 
-A single-instance mutex stops a second keeper starting. The keeper writes its pipe name and the `myterm-cli.exe` path to `%LOCALAPPDATA%\myterm\keeper.json` so ssh commands can find them.
+The keeper creates the first pipe instance with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a second keeper fails to create it (access denied) and exits; pipe names are machine-global, so this works across the desktop and ssh logons and no separate mutex is needed. The keeper writes its pipe name and the `myterm-cli.exe` path to `%LOCALAPPDATA%\myterm\keeper.json` so ssh commands can find them.
 
-**Control pipe.** `\\.\pipe\myterm-keeper-<user SID>`, created with an explicit DACL that grants access to the owning user's SID only. Pipe names are machine-global, so a pipe created in the desktop logon can be reached from an ssh logon of the same user. Requests are one JSON line each; replies are one JSON line, except `attach`, which switches the connection to a framed byte stream.
+**Control pipe.** `\\.\pipe\myterm-keeper-<user SID>`, created with the DACL `D:P(A;;GA;;;<user SID>)` (the owning user only) and `PIPE_REJECT_REMOTE_CLIENTS`. Pipe names are machine-global, so a pipe created in the desktop logon can be reached from an ssh logon of the same user, and the other way round. No mandatory label is needed: a medium-integrity desktop client can open a pipe created by a high-integrity keeper. Requests are one JSON line each; replies are one JSON line, except `attach`, which switches the connection to a framed byte stream.
 
 | Request | Effect |
 |---|---|
@@ -390,28 +390,40 @@ A single-instance mutex stops a second keeper starting. The keeper writes its pi
 
 **Remote Windows hosts.** The host channel (5.1) stays one long-lived `ssh -T` per host but runs `myterm-cli channel`, which speaks the same sentinel-framed protocol as the `/bin/sh` channel and forwards each request to the pipe. Polling, create, rename, kill and upload all go through it. Attaching runs `ssh -t <host> myterm-cli attach <id>`. When the connection drops only the helper dies; the reconnect path (5.4) then works unchanged.
 
-**Attach and redraw.** Several clients may attach to one session; input from any is accepted, and the most recently active client's size wins (as tmux). ConPTY keeps no history a client can ask for, so on attach the keeper forces a full repaint by resizing the pseudoconsole (to the attaching size, or by one row and back). A later version can keep screen state and scrollback in the keeper with a VT emulator (`vt100` or `alacritty_terminal`) and replay it instead. Scrollback on Windows sessions is xterm.js's and covers only what that client has seen.
+`myterm-cli attach` relays like this, because sshd runs it inside Win32-OpenSSH's own ConPTY:
+
+- Console code pages set to UTF-8 (65001) both ways; stdout in VT processing mode, written with `WriteFile`.
+- stdin in raw VT input mode (processed, line and echo input off; `ENABLE_VIRTUAL_TERMINAL_INPUT` and `ENABLE_WINDOW_INPUT` on), read with `ReadConsoleInputW`, not `ReadFile`, so resizes arrive as `WINDOW_BUFFER_SIZE_EVENT` records.
+- Text comes from key-down records, plus key-up records of Alt (VK 0x12): characters that are not on the keyboard layout (✓, emoji) arrive as an Alt+numpad sequence whose character is on the Alt key-up. Surrogate pairs can span two records.
+- An escape sequence that is still incomplete at the end of a read (lone ESC, `ESC [` with no final byte, `ESC O`) is held for up to 20 ms for the rest. sshd's ConPTY splits sequences across reads, and a lone ESC written to the keeper's ConPTY reaches the shell as the Escape key, so Up arrow arrived as Escape then `[A`.
+- The new size is taken from the record's `dwSize`. Asking the console for its size while handling the event can still return the old size.
+
+**Attach and redraw.** Several clients may attach to one session; input from any is accepted, and the most recently active client's size wins (as tmux). ConPTY keeps no history a client can ask for, so on attach the keeper forces a full repaint by resizing the pseudoconsole (to the attaching size, or by one row and back). This works only with the inbox ConPTY: the bundled ConPTY 1.25 that the UI uses for its own terminals never repaints on resize, whatever the flags. A later version can keep screen state and scrollback in the keeper with a VT emulator (`vt100` or `alacritty_terminal`) and replay it instead. Scrollback on Windows sessions is xterm.js's and covers only what that client has seen.
 
 **Host kind and bootstrap.** The Windows probe (channel.rs) then checks for the keeper:
 
 - `myterm-cli` found and keeper running → kind `keeper`; sessions are persistent and discoverable.
-- `myterm-cli` found, keeper not running → the channel starts it, detached from the ssh job via WMI (`Win32_Process.Create`), and reports a note on the host that it will stop at logoff.
+- `myterm-cli` found, keeper not running → the channel starts it outside the ssh job:
+  1. Preferred: a per-user scheduled task `myterm-keeper` (registered by the installer or on first use; action `myterm.exe --keeper`, logon type Interactive, run level Limited, no time limit), started with `Start-ScheduledTask`. It runs in the user's desktop logon (session 1, medium integrity), so it has the same credentials as a keeper the UI started. It only runs while the user is logged on at the desktop.
+  2. Otherwise, when nobody is logged on at the desktop: WMI (`Win32_Process.Create`). This keeper runs in session 0 in a network logon derived from the ssh logon, at high integrity for administrators. It survives the disconnect, but its sessions cannot see Windows Credential Manager (so Git Credential Manager, `gh` and similar find no saved logins) and probably cannot reach network shares. The host shows a note saying so.
 - myterm not installed → kind `ephemeral` as in v1 (5.6).
 
 A version mismatch between client and keeper shows on the host heading; the protocol carries a version so older keepers can still be listed.
 
 **Attention state.** The Claude hook script on Windows writes the state file keyed by `MYTERM_SESSION` (8.5) and the keeper includes that state in `list`, so the channel no longer reads the folder itself.
 
-**Lifetime.** Sessions end on reboot or logoff, as with tmux. Quitting the UI, updating it, or a UI crash does not touch them. Updating the keeper itself ends its sessions, so the updater asks first when any are running and otherwise leaves the old keeper running until it is idle. Processes run in the user's interactive logon, so they have the user's full credentials (network shares, DPAPI), unlike processes started directly by sshd.
+**Lifetime.** Sessions end on reboot or logoff, as with tmux. Quitting the UI, updating it, or a UI crash does not touch them. Updating the keeper itself ends its sessions, so the updater asks first when any are running and otherwise leaves the old keeper running until it is idle. A keeper started by the UI or by the scheduled task runs in the user's interactive logon, so its sessions have the user's full credentials (Credential Manager, network shares, DPAPI), unlike processes started directly by sshd. A keeper started through WMI does not (see bootstrap).
 
 **Model changes.** Host kind gains `keeper`. On keeper hosts `persistent` is true, rows have no windows (one row per session, like ephemeral rows today), and the ephemeral marker and quit warning do not apply.
 
-**To verify first.**
+**Verified** (2026-11-25, Windows 11 build 26200, Win32-OpenSSH sshd 9.5, ssh to localhost as an administrator; spike in `spikes/keeper-verify/`):
 
-1. A process started by WMI from an ssh session survives the disconnect.
-2. A pipe created in the desktop logon with a user-SID DACL accepts a connection from an ssh (S4U) logon of the same user.
-3. Resizing the pseudoconsole repaints the full screen for Claude Code and for PowerShell/cmd.
-4. `myterm-cli` under `ssh -t` passes keys, resize and UTF-8 through Win32-OpenSSH's own ConPTY without mangling.
+1. **A process started by WMI from an ssh session survives the disconnect: yes.** Control: the same keeper started with `Start-Process` inside the ssh session dies when the connection closes. The WMI keeper runs in session 0, network logon, high integrity, and sees none of the user's Credential Manager entries (67 from the desktop, 0 from it); DPAPI works. A scheduled task with an Interactive principal, started from ssh, runs the keeper in the desktop logon (session 1, medium, all entries visible) instead, hence the bootstrap order above.
+2. **A pipe created in the desktop logon with a user-SID DACL accepts a connection from an ssh logon of the same user: yes**, and the other way round: a high-integrity keeper started over ssh accepts medium-integrity desktop clients without a mandatory label. A second keeper is refused by `FILE_FLAG_FIRST_PIPE_INSTANCE`.
+3. **Resizing the pseudoconsole repaints the full screen: yes, with the inbox ConPTY and no creation flags.** A blank client fed only the bytes after the resize ends up identical cell for cell (text, colours, attributes, cursor) to one that saw everything, for pwsh, Windows PowerShell, cmd and Claude Code, both for a one-row nudge and a real size change. Startup takes about 280 ms with no stall. Two flags are wrong for a keeper, and portable-pty 0.9 always passes both: `PSEUDOCONSOLE_INHERIT_CURSOR` asks the terminal for the cursor position and waits forever when no client is attached, and `PSEUDOCONSOLE_RESIZE_QUIRK` suppresses the repaint in newer ConPTYs (the inbox one ignores it). The bundled ConPTY 1.25 never repaints on resize. Note that `LoadLibrary("conpty.dll")` searches PATH, so a sideloading app can pick up another program's copy (WezTerm's here); the keeper loads it from kernel32 explicitly.
+4. **`myterm-cli attach` under `ssh -t` passes keys, resize and UTF-8: yes, with the relay rules above.** Driven through a local ConPTY standing in for xterm.js: UTF-8 both ways (é ✓ 日本 🙂), Up arrow history, Ctrl+C, Tab completion and two resizes reaching pwsh all pass in three runs out of three. Without those rules, ✓ and emoji were dropped, Up arrow arrived as Escape then `[A`, and a resize was lost.
+
+Still unverified: the scheduled-task bootstrap for a non-administrator user; what happens to a WMI-started keeper at logoff; repaint on older inbox ConPTYs (Windows 10, Server 2019/2022), so the keeper should report the Windows build in `version`; remote network shares from a WMI keeper.
 
 ## 15. Resolved questions
 
