@@ -3,6 +3,7 @@ import { fuzzyFilter, fuzzyScore } from "./fuzzy";
 import { diffLines, hunks } from "./diff";
 import { matches, parseBinding } from "./keys";
 import { sessionKeyOfRow } from "./rowkey";
+import { diffInput } from "./mobileinput";
 
 describe("fuzzy", () => {
   it("matches subsequences and rejects non-matches", () => {
@@ -61,5 +62,30 @@ describe("sessionKeyOfRow", () => {
     expect(sessionKeyOfRow("intra/0:@84")).toBe("intra/0");
     expect(sessionKeyOfRow("local/1795621712003")).toBe("local/1795621712003");
     expect(sessionKeyOfRow("local/~eph-1795564925000")).toBe("local/~eph-1795564925000");
+  });
+});
+
+describe("diffInput", () => {
+  it("sends only what a composing keyboard added", () => {
+    // "tput" composed letter by letter must arrive once, not as "tputputt".
+    let sent = "";
+    let out = "";
+    for (const v of ["t", "tp", "tpu", "tput", "tput ", "tput c", "tput co", "tput col", "tput cols"]) {
+      out += diffInput(sent, v);
+      sent = v;
+    }
+    expect(out).toBe("tput cols");
+  });
+  it("replaces an autocorrected word with backspaces", () => {
+    expect(diffInput("teh", "the ")).toBe("\x7f\x7fhe ");
+  });
+  it("deletes", () => {
+    expect(diffInput("abc", "ab")).toBe("\x7f");
+  });
+  it("turns a newline into Enter", () => {
+    expect(diffInput("ls", "ls\n")).toBe("\r");
+  });
+  it("counts an emoji as one character to delete", () => {
+    expect(diffInput("a🙂", "a")).toBe("\x7f");
   });
 });

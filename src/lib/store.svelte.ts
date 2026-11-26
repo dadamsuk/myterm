@@ -21,7 +21,7 @@ export interface TermStatus {
 
 export const app = $state({
   ready: false,
-  platform: "windows" as "windows" | "macos" | "linux",
+  platform: "windows" as "windows" | "macos" | "linux" | "android",
   config: null as Config | null,
   configError: null as string | null,
   hosts: [] as HostInfo[],

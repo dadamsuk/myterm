@@ -1,4 +1,5 @@
 import { Terminal, type ITheme } from "@xterm/xterm";
+import { attachMobileInput } from "./mobileinput";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -201,6 +202,12 @@ class TerminalManager {
       if (e.pty !== null) api.resize(e.pty, cols, rows).catch(() => {});
     });
     term.attachCustomKeyEventHandler((ev) => this.keyHandler(e, ev));
+    if (app.platform === "android" && term.textarea) {
+      attachMobileInput(el, term.textarea, (d) => {
+        this.capture(e, d);
+        this.send(e, d);
+      });
+    }
     // Right-click opens myterm's menu rather than reaching tmux's own.
     el.addEventListener(
       "mousedown",

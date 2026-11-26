@@ -44,7 +44,15 @@ fn boot(app: State<Arc<App>>) -> Boot {
         config_error: app.config_error.lock().unwrap().clone(),
         state: app.state.lock().unwrap().clone(),
         snapshot: app.snapshot(),
-        platform: if cfg!(target_os = "macos") { "macos" } else if cfg!(windows) { "windows" } else { "linux" },
+        platform: if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(windows) {
+            "windows"
+        } else if cfg!(target_os = "android") {
+            "android"
+        } else {
+            "linux"
+        },
     }
 }
 
