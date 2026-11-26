@@ -18,6 +18,7 @@
   import HookDialog from "./components/HookDialog.svelte";
   import ConfirmQuit from "./components/ConfirmQuit.svelte";
   import HostsDialog from "./components/HostsDialog.svelte";
+  import SettingsEditor from "./components/SettingsEditor.svelte";
   import ContextMenu from "./components/ContextMenu.svelte";
   import TermMenu from "./components/TermMenu.svelte";
   import SaveSession from "./components/SaveSession.svelte";
@@ -250,6 +251,8 @@
   <ConfirmQuit count={app.overlay.count} />
 {:else if app.overlay?.kind === "hosts"}
   <HostsDialog focusHost={app.overlay.host} />
+{:else if app.overlay?.kind === "settings"}
+  <SettingsEditor />
 {:else if app.overlay?.kind === "save"}
   <SaveSession row={app.overlay.row} saved={app.overlay.saved} />
 {/if}

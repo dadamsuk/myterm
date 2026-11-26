@@ -289,6 +289,11 @@ export async function removeHost(alias: string) {
 }
 
 export async function openSettings() {
+  // Android has no text editor to hand the file to: edit it in the app.
+  if (app.platform === "android") {
+    app.overlay = { kind: "settings" };
+    return;
+  }
   try {
     await api.openConfig();
   } catch (e) {

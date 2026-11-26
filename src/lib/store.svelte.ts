@@ -10,6 +10,7 @@ export type Overlay =
   | { kind: "hooks"; host: string; install: boolean }
   | { kind: "confirm-quit"; count: number }
   | { kind: "hosts"; host?: string }
+  | { kind: "settings" }
   /** Save a running session (`row`) or edit a saved one (`saved`). */
   | { kind: "save"; row?: Row; saved?: SavedSession }
   | null;

@@ -307,6 +307,27 @@ fn config_path() -> String {
     config::config_path().to_string_lossy().to_string()
 }
 
+/// config.toml as text, for the in-app editor (Android has no editor to
+/// open it in).
+#[tauri::command]
+fn read_config_text() -> R<String> {
+    let path = config::config_path();
+    if !path.exists() {
+        config::load_config(); // writes the commented template
+    }
+    std::fs::read_to_string(&path).map_err(err)
+}
+
+/// Saves config.toml from the in-app editor. Refuses text that does not
+/// parse, so a typo cannot leave the app on the default settings.
+#[tauri::command]
+fn write_config_text(app: State<Arc<App>>, text: String) -> R<()> {
+    toml::from_str::<config::Config>(&text).map_err(|e| format!("Not saved: {e}"))?;
+    std::fs::write(config::config_path(), text).map_err(err)?;
+    reload_config(app.inner());
+    Ok(())
+}
+
 /// Opens config.toml in the default editor. Done here rather than through the
 /// opener plugin from JS, whose path scope would otherwise have to allow it.
 #[tauri::command]
@@ -508,6 +529,8 @@ pub fn run() {
             builtin_public_key,
             forget_host_key,
             set_host_details,
+            read_config_text,
+            write_config_text,
             snapshot,
             attach,
             open_login,

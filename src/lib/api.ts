@@ -211,6 +211,8 @@ export const api = {
   getState: () => invoke<UiState>("get_state"),
   configPath: () => invoke<string>("config_path"),
   openConfig: () => invoke<void>("open_config"),
+  readConfigText: () => invoke<string>("read_config_text"),
+  writeConfigText: (text: string) => invoke<void>("write_config_text", { text }),
   openSshConfig: () => invoke<void>("open_ssh_config"),
   quit: () => invoke<void>("quit"),
 };
