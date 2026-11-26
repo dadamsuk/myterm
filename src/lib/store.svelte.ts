@@ -47,6 +47,12 @@ export const app = $state({
   toast: null as { text: string; error?: boolean } | null,
   /** Claude or plain shell: the last choice in the new-session form. */
   newKind: "claude" as "claude" | "shell",
+  /** Phone layout (spec 14.4): narrower than 700 px. */
+  phone: false,
+  /** Phone layout: the list is on screen rather than the terminal. */
+  phoneList: true,
+  /** Keys row: Ctrl or Alt waiting to apply to the next key. */
+  keyMods: { ctrl: false, alt: false },
 });
 
 export const isMac = () => app.platform === "macos";

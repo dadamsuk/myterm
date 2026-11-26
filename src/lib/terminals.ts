@@ -78,6 +78,10 @@ class TerminalManager {
   /** Sessions saved as open, still waiting for their host at start-up. */
   private restoring: { keys: string[]; active: string | null; until: number } | null = null;
 
+  /** Called when a terminal is put on screen by the user (not by restore). */
+  onShow: ((key: string) => void) | null = null;
+  private quietShow = false;
+
   mount(container: HTMLElement) {
     this.container = container;
     for (const e of this.entries.values()) container.appendChild(e.el);
@@ -204,6 +208,7 @@ class TerminalManager {
     term.attachCustomKeyEventHandler((ev) => this.keyHandler(e, ev));
     if (app.platform === "android" && term.textarea) {
       attachMobileInput(el, term.textarea, (d) => {
+        d = applyMods(d);
         this.capture(e, d);
         this.send(e, d);
       });
@@ -512,7 +517,11 @@ class TerminalManager {
     r.keys = r.keys.filter((key, i) => {
       const s = sessionByKey(key);
       if (!s || !s.persistent || !isReachable(s)) return true;
-      if (key === r.active && app.active === null) this.open(s);
+      if (key === r.active && app.active === null) {
+        this.quietShow = true;
+        this.open(s);
+        this.quietShow = false;
+      }
       else this.openHidden(s, now - (i + 1) * 1000);
       return false;
     });
@@ -589,6 +598,7 @@ class TerminalManager {
     if (prev && prev !== key && sessionByKey(prev)) markViewed(prev);
     for (const [k, e] of this.entries) e.el.style.display = k === key ? "block" : "none";
     app.active = key;
+    if (!this.quietShow) this.onShow?.(key);
     const e = this.entries.get(key);
     if (e) {
       e.lastShown = Date.now();
@@ -652,6 +662,20 @@ class TerminalManager {
     return this.entries.get(key)?.kind === "tmux";
   }
 
+  /** Keys row (phone): sends a key to the terminal on screen. Arrows follow
+   *  the terminal's cursor-key mode, as xterm's own keys do. */
+  sendKey(data: string) {
+    const e = app.active ? this.entries.get(app.active) : undefined;
+    if (!e) return;
+    const arrow = /^\x1b\[([ABCD])$/.exec(data);
+    if (arrow && app.keyMods.ctrl) data = `\x1b[1;5${arrow[1]}`;
+    else if (arrow && e.term.modes.applicationCursorKeysMode) data = `\x1bO${arrow[1]}`;
+    if (app.keyMods.alt) data = "\x1b" + data;
+    app.keyMods.ctrl = false;
+    app.keyMods.alt = false;
+    this.send(e, data);
+  }
+
   focusActive() {
     const e = app.active ? this.entries.get(app.active) : undefined;
     e?.term.focus();
@@ -659,6 +683,8 @@ class TerminalManager {
 
   private fitEntry(e: Entry) {
     if (e.el.style.display === "none" || !e.el.isConnected) return;
+    // Hidden pane (phone list on screen): fitting now would tell tmux 2 columns.
+    if (!this.container?.clientWidth || !this.container.clientHeight) return;
     try {
       e.fit.fit();
     } catch {
@@ -727,6 +753,21 @@ class TerminalManager {
   runningEphemerals(): number {
     return [...this.entries.values()].filter((e) => e.kind === "ephemeral" && e.pty !== null).length;
   }
+}
+
+/** Applies a sticky Ctrl or Alt from the keys row to one typed character. */
+function applyMods(d: string): string {
+  const { ctrl, alt } = app.keyMods;
+  if (!ctrl && !alt) return d;
+  app.keyMods.ctrl = false;
+  app.keyMods.alt = false;
+  if (ctrl && d.length === 1) {
+    const c = d.toUpperCase().charCodeAt(0);
+    if (c >= 64 && c <= 95) d = String.fromCharCode(c - 64); // Ctrl+A..Z, Ctrl+[ \ ] ^ _
+    else if (d === " ") d = "\x00";
+    else if (d === "?") d = "\x7f";
+  }
+  return alt ? "\x1b" + d : d;
 }
 
 export const terminals = new TerminalManager();

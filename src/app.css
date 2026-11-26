@@ -64,6 +64,12 @@ input {
   height: 100%;
 }
 
+/* Below the last whole row xterm shows its viewport, which is black by
+   default rather than the theme background. */
+.term .xterm-viewport {
+  background-color: var(--term-bg) !important;
+}
+
 .term.no-scrollbar .xterm-viewport {
   overflow-y: hidden !important;
 }

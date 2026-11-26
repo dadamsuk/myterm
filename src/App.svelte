@@ -6,7 +6,8 @@
   import { activeRow, activeWindow, app, isMac, sessionByKey, sidebarRows, toast, windowKey } from "./lib/store.svelte";
   import { terminals } from "./lib/terminals";
   import { matches, parseBinding } from "./lib/keys";
-  import { activateRow, autostartSaved, peekSidebar, toggleSidebar } from "./lib/actions";
+  import { activateRow, autostartSaved, peekSidebar, showPhoneTerminal, toggleSidebar } from "./lib/actions";
+  import KeyBar from "./components/KeyBar.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import Header from "./components/Header.svelte";
   import TerminalPane from "./components/TerminalPane.svelte";
@@ -94,6 +95,10 @@
   // Auto-hide: the sidebar slides out when the pointer rests on the left
   // edge, and goes away shortly after the pointer leaves it.
   let docked = $derived(!app.sidebarAutoHide && !app.sidebarCollapsed);
+  // Phone layout: the list, or a terminal full screen.
+  let phoneList = $derived(app.phoneList || !app.active);
+  const measure = () => (app.phone = window.innerWidth < 700);
+  measure();
   let enterTimer: ReturnType<typeof setTimeout> | undefined;
   let leaveTimer: ReturnType<typeof setTimeout> | undefined;
   function edgeEnter() {
@@ -161,6 +166,11 @@
 
   onMount(() => {
     window.addEventListener("keydown", onKey, true);
+    window.addEventListener("resize", measure);
+    // Back from a terminal (gesture or button) shows the list again.
+    const onPop = () => (app.phoneList = true);
+    window.addEventListener("popstate", onPop);
+    terminals.onShow = () => showPhoneTerminal();
     const unlisten: Promise<() => void>[] = [];
     (async () => {
       const b = await api.boot();
@@ -188,13 +198,17 @@
     })();
     return () => {
       window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("popstate", onPop);
       unlisten.forEach((p) => p.then((f) => f()));
     };
   });
 </script>
 
 <div class="shell" class:mac={app.platform === "macos"}>
-  {#if docked}
+  {#if app.phone}
+    {#if phoneList}<Sidebar />{/if}
+  {:else if docked}
     <Sidebar />
   {:else if app.sidebarPeek}
     <div class="peek" role="presentation" onpointerenter={peekEnter} onpointerleave={peekLeave}>
@@ -203,9 +217,10 @@
   {:else if app.sidebarAutoHide}
     <div class="edge" role="presentation" onpointerenter={edgeEnter} onpointerleave={edgeLeave}></div>
   {/if}
-  <main onpointerdown={() => !docked && app.sidebarPeek && (app.sidebarPeek = false)}>
+  <main class:gone={app.phone && phoneList} onpointerdown={() => !docked && app.sidebarPeek && (app.sidebarPeek = false)}>
     <Header />
     <TerminalPane />
+    {#if app.phone && app.active}<KeyBar />{/if}
   </main>
 </div>
 
@@ -262,6 +277,9 @@
     bottom: 0;
     width: 6px;
     z-index: 39;
+  }
+  main.gone {
+    display: none;
   }
   main {
     flex: 1;

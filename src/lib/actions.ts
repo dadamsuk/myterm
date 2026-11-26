@@ -339,3 +339,21 @@ export function dismissEnded(key: string) {
   const s = app.sessions.find((x) => x.key === key);
   if (s && !s.persistent) api.killSession(s.host, s.slug).catch(() => {});
 }
+
+/** Phone layout: the terminal full screen. Back (gesture or button) returns
+ *  to the list through the history entry pushed here. */
+export function showPhoneTerminal() {
+  if (!app.phone || !app.phoneList) return;
+  app.phoneList = false;
+  history.pushState({ myterm: "term" }, "");
+  setTimeout(() => {
+    terminals.fitActive();
+    terminals.focusActive();
+  }, 50);
+}
+
+export function showPhoneList() {
+  if (!app.phone || app.phoneList) return;
+  if (history.state?.myterm === "term") history.back();
+  else app.phoneList = true;
+}

@@ -71,7 +71,7 @@
   let hostsOpen = $state(false);
 </script>
 
-<aside class:floating style="width: {app.sidebarWidth}px">
+<aside class:floating class:phone={app.phone} style={app.phone ? "" : `width: ${app.sidebarWidth}px`}>
   <div class="tools">
     <button title="New session{hint(keys?.new_session)}" aria-label="New session" onclick={() => (app.overlay = { kind: "new" })}>
       <svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" /></svg>
@@ -88,6 +88,7 @@
     <button title="Settings (opens config.toml)" aria-label="Settings" onclick={openSettings}>
       <svg viewBox="0 0 16 16"><path d="M6.9 1.5h2.2l.4 1.8 1.2.5 1.6-1 1.5 1.5-1 1.6.5 1.2 1.8.4v2.2l-1.8.4-.5 1.2 1 1.6-1.5 1.5-1.6-1-1.2.5-.4 1.8H6.9l-.4-1.8-1.2-.5-1.6 1-1.5-1.5 1-1.6-.5-1.2-1.8-.4V6.9l1.8-.4.5-1.2-1-1.6 1.5-1.5 1.6 1 1.2-.5z" /><circle cx="8" cy="8" r="2.1" /></svg>
     </button>
+    {#if !app.phone}
     <button
       class="collapse"
       class:on={app.sidebarAutoHide}
@@ -104,6 +105,7 @@
       <button title="Hide sidebar{hint(keys?.toggle_sidebar)}" aria-label="Hide sidebar" onclick={toggleSidebar}>
         <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" /><path d="M6 2.5v11M11 6 9 8l2 2" /></svg>
       </button>
+    {/if}
     {/if}
   </div>
   <div class="modes" role="tablist">
@@ -201,6 +203,7 @@
     {/if}
   </div>
 
+  {#if !app.phone}
   <div
     class="resizer"
     role="separator"
@@ -209,6 +212,7 @@
     onpointermove={moveResize}
     onpointerup={endResize}
   ></div>
+  {/if}
 </aside>
 
 <style>
@@ -221,6 +225,11 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+  }
+  /* Phone: the list is the whole screen. */
+  aside.phone {
+    flex: 1;
+    border-right: 0;
   }
   /* Auto-hide: over the terminal rather than beside it. */
   aside.floating {

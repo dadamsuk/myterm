@@ -1,6 +1,6 @@
 <script lang="ts">
   import { activeRow, app, hostInfo, multiSession, rowCwd, rowName, rowState, rowsOf, sessionByKey } from "../lib/store.svelte";
-  import { toggleSidebar } from "../lib/actions";
+  import { showPhoneList, toggleSidebar } from "../lib/actions";
 
   let session = $derived(sessionByKey(app.active));
   // The window on screen: its name, folder and state.
@@ -22,13 +22,21 @@
   });
 </script>
 
-<header>
-  <button class="toggle" title="Toggle sidebar" aria-label="Toggle sidebar" onclick={toggleSidebar}>
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-      <rect x="1.5" y="2.5" width="13" height="11" rx="2" />
-      <line x1="6" y1="2.5" x2="6" y2="13.5" />
-    </svg>
-  </button>
+<header class:phone={app.phone}>
+  {#if app.phone}
+    <button class="toggle" title="Back to the list" aria-label="Back to the list" onclick={showPhoneList}>
+      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+        <path d="M10 3 5 8l5 5" />
+      </svg>
+    </button>
+  {:else}
+    <button class="toggle" title="Toggle sidebar" aria-label="Toggle sidebar" onclick={toggleSidebar}>
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="1.5" y="2.5" width="13" height="11" rx="2" />
+        <line x1="6" y1="2.5" x2="6" y2="13.5" />
+      </svg>
+    </button>
+  {/if}
   {#if session && row}
     {@const st = rowState(row)}
     <span class="title">{rowName(row)}</span>
@@ -61,6 +69,13 @@
     white-space: nowrap;
     overflow: hidden;
     -webkit-app-region: drag;
+  }
+  header.phone {
+    height: 42px;
+  }
+  /* Too little room on a phone for the folder. */
+  header.phone .cwd {
+    display: none;
   }
   .toggle {
     background: none;
