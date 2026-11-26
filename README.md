@@ -11,8 +11,19 @@ npx tauri build      # installers in src-tauri/target/release/bundle
 npm test             # frontend unit tests
 cd src-tauri && cargo test                                   # backend unit tests
 cd src-tauri && cargo test live -- --ignored --nocapture     # live check against ~/.ssh/config hosts
-                                                             # (MYTERM_HOST=a,b limits the hosts)
+                                                             # (MYTERM_HOST=a,b limits the hosts;
+                                                             #  MYTERM_BUILTIN=1 uses the built-in SSH client)
 ```
+
+Android (spec 14.4). Needs JDK 17, the Android SDK and NDK, `rustup target add aarch64-linux-android`, and on Windows Developer Mode (Tauri links the library with a symlink):
+
+```
+export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk" NDK_HOME="$ANDROID_HOME/ndk/<version>"
+npx tauri android build --debug --target aarch64 --apk
+adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+```
+
+On the phone, config and keys live in the app's private folder (`adb shell run-as net.myterm.app ls`).
 
 ## Layout
 

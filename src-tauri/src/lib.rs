@@ -416,9 +416,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Quitting(AtomicBool::new(false)))
         .setup(|tauri_app| {
+            #[cfg(mobile)]
+            config::set_data_dir(tauri_app.path().app_data_dir()?);
             let app = App::new(tauri_app.handle().clone());
             tauri_app.manage(app.clone());
 
+            #[cfg(desktop)]
             if let Some(w) = tauri_app.get_webview_window("main") {
                 if let Some(g) = app.state.lock().unwrap().window.clone() {
                     if g.width >= 400 && g.height >= 300 {

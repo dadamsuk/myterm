@@ -453,6 +453,7 @@ impl std::io::Write for Writer {
 
 /// Fills unset fields of a destination: `ssh -G` on desktop reads
 /// ~/.ssh/config exactly as ssh would.
+#[cfg_attr(target_os = "android", allow(unused_mut))]
 pub async fn resolve(alias: &str, address: Option<&str>, user: Option<&str>, port: Option<u16>) -> Result<Dest> {
     let mut identities = vec![];
     let (mut host, mut u, mut p) = match alias.split_once('@') {

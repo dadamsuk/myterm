@@ -4,7 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+static DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Sets the data folder where the platform decides it (the app's private
+/// storage on Android, where there is no config folder).
+pub fn set_data_dir(p: PathBuf) {
+    let _ = DATA_DIR.set(p);
+}
+
 pub fn data_dir() -> PathBuf {
+    if let Some(p) = DATA_DIR.get() {
+        return p.clone();
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("myterm")

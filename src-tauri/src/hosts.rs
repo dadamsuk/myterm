@@ -179,6 +179,15 @@ impl App {
     /// ~/.ssh/config (honouring the old `hidden_hosts` and `# myterm: ignore`)
     /// and written back, so from then on config.toml alone decides.
     fn host_list(&self) -> Vec<config::HostEntry> {
+        let mut list = self.host_list_inner();
+        // No local sessions on Android: no /bin/sh to speak of, and no tmux.
+        if cfg!(target_os = "android") {
+            list.retain(|e| e.name != LOCAL);
+        }
+        list
+    }
+
+    fn host_list_inner(&self) -> Vec<config::HostEntry> {
         let cfg = self.cfg();
         if let Some(list) = cfg.host_list {
             return config::clean_hosts(list);
