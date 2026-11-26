@@ -8,6 +8,7 @@ pub mod keeper;
 mod live_test;
 mod pty;
 mod sshconfig;
+mod sshlib;
 mod tmux;
 
 use hosts::{App, HookPlan, Snapshot};
@@ -62,13 +63,19 @@ async fn attach(
     channel: Channel<InvokeResponseBody>,
 ) -> R<u32> {
     let cmd = app.attach_command(&host, &slug).await.map_err(err)?;
-    app.ptys.spawn(cmd, cols, rows, channel, None).map_err(err)
+    app.ptys.spawn(cmd, cols, rows, channel, None).await.map_err(err)
 }
 
 #[tauri::command]
-fn open_login(app: State<Arc<App>>, host: String, cols: u16, rows: u16, channel: Channel<InvokeResponseBody>) -> R<u32> {
-    let cmd = app.login_command(&host);
-    app.ptys.spawn(cmd, cols, rows, channel, None).map_err(err)
+async fn open_login(
+    app: State<'_, Arc<App>>,
+    host: String,
+    cols: u16,
+    rows: u16,
+    channel: Channel<InvokeResponseBody>,
+) -> R<u32> {
+    let cmd = app.login_command(&host).await.map_err(err)?;
+    app.ptys.spawn(cmd, cols, rows, channel, None).await.map_err(err)
 }
 
 #[derive(Serialize)]
@@ -80,8 +87,8 @@ struct Started {
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn start_ephemeral(
-    app: State<Arc<App>>,
+async fn start_ephemeral(
+    app: State<'_, Arc<App>>,
     host: String,
     dir: String,
     name: String,
@@ -93,6 +100,7 @@ fn start_ephemeral(
     let (key, pty, input) = app
         .inner()
         .start_ephemeral(&host, &dir, &name, &kind, cols, rows, channel)
+        .await
         .map_err(err)?;
     Ok(Started { key, pty, input })
 }
@@ -177,6 +185,17 @@ async fn drop_files(app: State<'_, Arc<App>>, host: String, paths: Vec<String>) 
 #[tauri::command]
 fn attach_command_text(app: State<Arc<App>>, host: String, slug: String) -> R<String> {
     app.attach_command_text(&host, &slug).map_err(err)
+}
+
+/// The built-in SSH client's public key, for `authorized_keys` (14.4).
+#[tauri::command]
+fn builtin_public_key() -> R<String> {
+    sshlib::public_key_line().map_err(err)
+}
+
+#[tauri::command]
+async fn forget_host_key(app: State<'_, Arc<App>>, host: String) -> R<()> {
+    app.forget_host_key(&host).await.map_err(err)
 }
 
 #[tauri::command]
@@ -462,6 +481,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             boot,
+            builtin_public_key,
+            forget_host_key,
             snapshot,
             attach,
             open_login,

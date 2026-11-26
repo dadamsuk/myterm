@@ -1,11 +1,12 @@
 //! Hosts, their channels, discovery polling, and session operations.
 
-use crate::channel::{self, q, Channel, Probe, Target};
+use crate::channel::{self, q, Channel, Probe, Target, Via};
 use crate::config::{self, now_secs, Config, State};
 use crate::hooks;
 use crate::keeper::client::KeeperConn;
 use crate::keeper::KSession;
-use crate::pty::PtyManager;
+use crate::pty::{PtyManager, Spawn};
+use crate::sshlib;
 use crate::sshconfig;
 use crate::tmux::{self, ListResult, Session};
 use anyhow::{anyhow, bail, Result};
@@ -44,6 +45,8 @@ pub struct HostInfo {
     pub local: bool,
     pub win_powershell: bool,
     pub hooks_installed: bool,
+    /// Reached with the built-in SSH client (14.4).
+    pub builtin: bool,
 }
 
 pub struct Host {
@@ -338,6 +341,41 @@ impl App {
 
     // ---------- channel helpers ----------
 
+    fn builtin(&self, alias: &str) -> bool {
+        cfg!(target_os = "android")
+            || self.cfg().hosts.get(alias).and_then(|o| o.transport.as_deref()) == Some("builtin")
+    }
+
+    /// How to reach a remote host.
+    async fn via(&self, alias: &str) -> Result<Via> {
+        if !self.builtin(alias) {
+            return Ok(Via::System(alias.to_string()));
+        }
+        let o = self.cfg().hosts.get(alias).cloned().unwrap_or_default();
+        Ok(Via::Builtin(sshlib::resolve(alias, o.address.as_deref(), o.user.as_deref(), o.port).await?))
+    }
+
+    /// An interactive terminal on a remote host: `remote` run there, or its
+    /// login shell when None.
+    async fn remote_term(&self, host: &str, remote: Option<String>) -> Result<Spawn> {
+        Ok(match self.via(host).await? {
+            Via::Builtin(dest) => Spawn::Builtin { dest, cmd: remote },
+            Via::System(_) => {
+                let mut c = CommandBuilder::new("ssh");
+                if remote.is_some() {
+                    c.arg("-t");
+                    c.args(channel::SSH_OPTS);
+                }
+                c.arg(host);
+                if let Some(r) = remote {
+                    c.arg(r);
+                }
+                term_env(&mut c);
+                Spawn::Local(c)
+            }
+        })
+    }
+
     fn chan(&self, h: &Host) -> Result<Arc<Channel>> {
         h.channel
             .lock()
@@ -538,10 +576,10 @@ impl App {
     }
 
     /// Builds the PTY command that attaches to a tmux session (5.3).
-    pub async fn attach_command(&self, host: &str, slug: &str) -> Result<CommandBuilder> {
+    pub async fn attach_command(&self, host: &str, slug: &str) -> Result<Spawn> {
         let h = self.host(host)?;
         if h.info.lock().unwrap().kind == "keeper" {
-            let mut cmd = if h.is_local {
+            let cmd = if h.is_local {
                 let argv = local_cli_argv();
                 let mut c = CommandBuilder::new(&argv[0]);
                 c.args(&argv[1..]);
@@ -549,17 +587,12 @@ impl App {
                 if let Some(home) = dirs::home_dir() {
                     c.cwd(home);
                 }
-                c
+                term_env(&mut c);
+                Spawn::Local(c)
             } else {
                 let cli = h.keeper_cli.lock().unwrap().clone().ok_or_else(|| anyhow!("{host} has no keeper"))?;
-                let mut c = CommandBuilder::new("ssh");
-                c.arg("-t");
-                c.args(channel::SSH_OPTS);
-                c.arg(host);
-                c.arg(format!("{cli} attach {slug}"));
-                c
+                self.remote_term(host, Some(format!("{cli} attach {slug}"))).await?
             };
-            term_env(&mut cmd);
             self.state.lock().unwrap().last_viewed.insert(format!("{host}/{slug}"), now_secs());
             self.mark_state_dirty();
             return Ok(cmd);
@@ -571,37 +604,30 @@ impl App {
             let _ = self.run(&h, &tmux::mouse_script(&t, slug, true)).await;
         }
         let target = format!("={slug}");
-        let mut cmd = if h.is_local {
+        let cmd = if h.is_local {
             let mut c = CommandBuilder::new(&t);
             c.args(["-u", "-T", "RGB,clipboard", "attach-session", "-t", &target]);
             if let Some(home) = dirs::home_dir() {
                 c.cwd(home);
             }
-            c
+            term_env(&mut c);
+            Spawn::Local(c)
         } else {
-            let mut c = CommandBuilder::new("ssh");
-            c.arg("-t");
-            c.args(channel::SSH_OPTS);
-            c.arg(host);
-            c.arg(format!("{} -u -T RGB,clipboard attach-session -t {}", q(&t), q(&target)));
-            c
+            let remote = format!("{} -u -T RGB,clipboard attach-session -t {}", q(&t), q(&target));
+            self.remote_term(host, Some(remote)).await?
         };
-        term_env(&mut cmd);
         let key = format!("{host}/{slug}");
         self.state.lock().unwrap().last_viewed.insert(key, now_secs());
         self.mark_state_dirty();
         Ok(cmd)
     }
 
-    pub fn login_command(&self, host: &str) -> CommandBuilder {
-        let mut c = CommandBuilder::new("ssh");
-        c.arg(host);
-        term_env(&mut c);
-        c
+    pub async fn login_command(&self, host: &str) -> Result<Spawn> {
+        self.remote_term(host, None).await
     }
 
     /// Starts an ephemeral session (5.6). Returns (session key, pty id, text to type).
-    pub fn start_ephemeral(
+    pub async fn start_ephemeral(
         self: &Arc<Self>,
         host: &str,
         dir: &str,
@@ -614,7 +640,7 @@ impl App {
         let h = self.host(host)?;
         let id = self.next_eph.fetch_add(1, Ordering::SeqCst);
         let cfg = self.cfg();
-        let (mut cmd, powershell) = if h.is_local {
+        let (cmd, powershell) = if h.is_local {
             let shell = cfg.local_shell.clone().unwrap_or_else(default_windows_shell);
             let ps = shell.to_ascii_lowercase().contains("pwsh") || shell.to_ascii_lowercase().contains("powershell");
             let mut c = CommandBuilder::new(&shell);
@@ -625,16 +651,23 @@ impl App {
                 c.cwd(home);
             }
             c.env("MYTERM_SESSION", id.to_string());
-            (c, ps)
+            term_env(&mut c);
+            (Spawn::Local(c), ps)
         } else {
             let ps = h.info.lock().unwrap().win_powershell;
-            let mut c = CommandBuilder::new("ssh");
-            c.arg("-t");
-            c.args(channel::SSH_OPTS);
-            c.arg(host);
-            (c, ps)
+            let cmd = match self.via(host).await? {
+                Via::Builtin(dest) => Spawn::Builtin { dest, cmd: None },
+                Via::System(_) => {
+                    let mut c = CommandBuilder::new("ssh");
+                    c.arg("-t");
+                    c.args(channel::SSH_OPTS);
+                    c.arg(host);
+                    term_env(&mut c);
+                    Spawn::Local(c)
+                }
+            };
+            (cmd, ps)
         };
-        term_env(&mut cmd);
         let mut input = String::new();
         let d = dir.trim();
         if !h.is_local && !d.is_empty() {
@@ -663,7 +696,7 @@ impl App {
             remove_eph_state_file(id);
             app.emit_snapshot();
         });
-        let pty = self.ptys.spawn(cmd, cols, rows, chan, Some(on_exit))?;
+        let pty = self.ptys.spawn(cmd, cols, rows, chan, Some(on_exit)).await?;
         let e = Ephemeral {
             id,
             host: host.to_string(),
@@ -698,8 +731,22 @@ impl App {
         if let Some(k) = h.keeper.lock().unwrap().take() {
             k.kill();
         }
+        if !h.is_local {
+            if let Ok(Via::Builtin(dest)) = self.via(host).await {
+                sshlib::forget_connection(&dest);
+            }
+        }
         h.wake.notify_one();
         Ok(())
+    }
+
+    /// Clears a built-in-client host's stored host key, then reconnects.
+    pub async fn forget_host_key(&self, host: &str) -> Result<()> {
+        let Via::Builtin(dest) = self.via(host).await? else {
+            bail!("{host} uses the system ssh; its host keys are in ~/.ssh/known_hosts");
+        };
+        sshlib::forget_host_key(&dest)?;
+        self.reconnect(host).await
     }
 
     // ---------- attention hooks (8.3) ----------
@@ -940,16 +987,13 @@ async fn local_keeper() -> Result<KeeperConn> {
 /// Finds myterm on a Windows host (keeper.json, written by the app there) and
 /// opens a control channel to its keeper. Returns the connection and the
 /// shell words that run myterm-cli on that host.
-async fn remote_keeper(host: &str, powershell: bool) -> Result<(KeeperConn, String)> {
+async fn remote_keeper(via: &Via, powershell: bool) -> Result<(KeeperConn, String)> {
     let read = if powershell {
         r#"Get-Content -Raw "$env:LOCALAPPDATA\myterm\keeper.json""#
     } else {
         r#"type "%LOCALAPPDATA%\myterm\keeper.json""#
     };
-    let mut cmd = channel::ssh_batch_command(host);
-    cmd.arg(read).stdin(std::process::Stdio::null()).kill_on_drop(true);
-    let out = tokio::time::timeout(Duration::from_secs(15), cmd.output()).await??;
-    let text = String::from_utf8_lossy(&out.stdout);
+    let (text, _) = channel::output(via, read, Duration::from_secs(15)).await?;
     let json = text.find('{').map(|i| &text[i..]).unwrap_or("");
     let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap_or_default();
     let argv: Vec<String> = v["cli"]
@@ -960,7 +1004,7 @@ async fn remote_keeper(host: &str, powershell: bool) -> Result<(KeeperConn, Stri
         bail!("myterm has not been run there");
     }
     let words = shell_words(&argv, powershell);
-    let conn = KeeperConn::ssh(host, &format!("{words} channel")).await?;
+    let conn = KeeperConn::remote(via, &format!("{words} channel")).await?;
     if conn.hello.proto != crate::keeper::PROTO {
         conn.kill();
         bail!("its keeper (v{}) is incompatible with this myterm", conn.hello.version);
@@ -1077,6 +1121,8 @@ pub fn poll_ephemeral_states(app: &App) {
 enum ConnectError {
     Windows { powershell: bool },
     NeedsLogin(String),
+    /// The built-in client was refused (key not accepted, host key changed).
+    NeedsKey(String),
     Failed(String),
 }
 
@@ -1099,17 +1145,29 @@ fn needs_login(stderr: &str) -> bool {
     .any(|p| l.contains(p))
 }
 
+fn connect_error(e: anyhow::Error) -> ConnectError {
+    match e.downcast_ref::<sshlib::NeedsKey>() {
+        Some(k) => ConnectError::NeedsKey(k.0.clone()),
+        None => ConnectError::Failed(e.to_string()),
+    }
+}
+
 async fn connect(app: &App, h: &Host) -> Result<(Arc<Channel>, tmux::Bootstrap, bool), ConnectError> {
+    let via = if h.is_local { None } else { Some(app.via(&h.alias).await.map_err(connect_error)?) };
+    app.set_info(h, |i| i.builtin = matches!(via, Some(Via::Builtin(_))));
     // A host last seen as Windows is probed first: its default shell cannot
     // run /bin/sh, and finding that out through the channel takes a timeout.
     let cached_windows = app.state.lock().unwrap().hosts.get(&h.alias).is_some_and(|c| c.kind == "windows");
-    if cached_windows && !h.is_local {
-        if let Probe::Windows { powershell } = channel::probe(&h.alias).await {
+    if let (true, Some(v)) = (cached_windows, &via) {
+        if let Probe::Windows { powershell } = channel::probe(v).await {
             return Err(ConnectError::Windows { powershell });
         }
     }
-    let target = if h.is_local { Target::LocalShell } else { Target::Ssh(h.alias.clone()) };
-    let ch = Channel::spawn(&target).map_err(|e| ConnectError::Failed(e.to_string()))?;
+    let target = match &via {
+        None => Target::LocalShell,
+        Some(v) => Target::Remote(v.clone()),
+    };
+    let ch = Channel::spawn(&target).await.map_err(connect_error)?;
     let cfg = app.cfg();
     let override_path = cfg.hosts.get(&h.alias).and_then(|o| o.tmux_path.clone());
     let script = format!(
@@ -1133,13 +1191,13 @@ async fn connect(app: &App, h: &Host) -> Result<(Arc<Channel>, tmux::Bootstrap, 
             tokio::time::sleep(Duration::from_millis(200)).await;
             let err = ch.stderr_text();
             ch.kill();
-            if h.is_local {
+            let Some(via) = via else {
                 return Err(ConnectError::Failed(e.to_string()));
-            }
-            if needs_login(&err) {
+            };
+            if matches!(via, Via::System(_)) && needs_login(&err) {
                 return Err(ConnectError::NeedsLogin(last_line(&err)));
             }
-            match channel::probe(&h.alias).await {
+            match channel::probe(&via).await {
                 Probe::Windows { powershell } => Err(ConnectError::Windows { powershell }),
                 Probe::Other(msg) => {
                     let msg = if last_line(&err).is_empty() { last_line(&msg) } else { last_line(&err) };
@@ -1289,7 +1347,8 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
                 );
                 app.mark_state_dirty();
                 app.set_info(&h, |i| i.win_powershell = powershell);
-                let why = match remote_keeper(&h.alias, powershell).await {
+                let keeper = async { remote_keeper(&app.via(&h.alias).await?, powershell).await };
+                let why = match keeper.await {
                     Ok((k, words)) => {
                         attempt = 0;
                         *h.keeper_cli.lock().unwrap() = Some(words);
@@ -1323,6 +1382,15 @@ async fn host_task(app: Arc<App>, h: Arc<Host>) {
                     i.connecting = false;
                     i.needs_login = true;
                     i.status = if msg.is_empty() { "needs interactive login".into() } else { format!("needs interactive login: {msg}") };
+                });
+            }
+            Err(ConnectError::NeedsKey(msg)) => {
+                app.set_info(&h, |i| {
+                    i.kind = "unavailable".into();
+                    i.connected = false;
+                    i.connecting = false;
+                    i.needs_login = false;
+                    i.status = format!("needs key: {msg}");
                 });
             }
             Err(ConnectError::Failed(msg)) => {

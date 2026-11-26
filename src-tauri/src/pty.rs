@@ -1,6 +1,7 @@
 //! PTY manager (sections 5.3, 7): one PTY per open terminal. Output is sent
 //! to the frontend as binary, batched per frame, with ack-based backpressure.
 
+use crate::sshlib::{self, Dest, In};
 use anyhow::{anyhow, Result};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde_json::json;
@@ -23,12 +24,53 @@ struct Flow {
     closed: AtomicBool,
 }
 
-struct Entry {
-    writer: Mutex<Box<dyn Write + Send>>,
+/// What a terminal runs: a local command in a PTY, or a command (a shell
+/// when None) on a host through the built-in SSH client, with a remote PTY.
+pub enum Spawn {
+    Local(CommandBuilder),
+    Builtin { dest: Dest, cmd: Option<String> },
+}
+
+trait Ctl: Send + Sync {
+    fn resize(&self, cols: u16, rows: u16) -> Result<()>;
+    fn kill(&self);
+}
+
+struct LocalCtl {
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+}
+
+impl Ctl for LocalCtl {
+    fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let m = self.master.lock().unwrap();
+        m.resize(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 })?;
+        Ok(())
+    }
+    fn kill(&self) {
+        let _ = self.killer.lock().unwrap().kill();
+    }
+}
+
+struct RemoteCtl(tokio::sync::mpsc::UnboundedSender<In>);
+
+impl Ctl for RemoteCtl {
+    fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.0.send(In::Resize(cols, rows)).map_err(|_| anyhow!("terminal closed"))
+    }
+    fn kill(&self) {
+        let _ = self.0.send(In::Close);
+    }
+}
+
+struct Entry {
+    writer: Mutex<Box<dyn Write + Send>>,
+    ctl: Box<dyn Ctl>,
     flow: Arc<Flow>,
 }
+
+type Waiter = Box<dyn FnOnce() -> u32 + Send>;
+type Parts = (Box<dyn Read + Send>, Box<dyn Write + Send>, Box<dyn Ctl>, Waiter);
 
 #[derive(Default)]
 pub struct PtyManager {
@@ -39,29 +81,42 @@ pub struct PtyManager {
 pub type OnExit = Box<dyn FnOnce(u32) + Send>;
 
 impl PtyManager {
-    pub fn spawn(
+    pub async fn spawn(
         self: &Arc<Self>,
-        cmd: CommandBuilder,
+        what: Spawn,
         cols: u16,
         rows: u16,
         chan: Channel<InvokeResponseBody>,
         on_exit: Option<OnExit>,
     ) -> Result<u32> {
-        let size = PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 };
-        let pair = native_pty_system().openpty(size)?;
-        let mut child = pair.slave.spawn_command(cmd)?;
-        drop(pair.slave);
-        let killer = child.clone_killer();
-        let mut reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
+        let (mut reader, writer, ctl, wait): Parts = match what {
+            Spawn::Local(cmd) => {
+                let size = PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 };
+                let pair = native_pty_system().openpty(size)?;
+                let mut child = pair.slave.spawn_command(cmd)?;
+                drop(pair.slave);
+                let killer = child.clone_killer();
+                let reader = pair.master.try_clone_reader()?;
+                let writer = pair.master.take_writer()?;
+                let ctl = LocalCtl { master: Mutex::new(pair.master), killer: Mutex::new(killer) };
+                let wait: Waiter = Box::new(move || child.wait().map(|s| s.exit_code()).unwrap_or(1));
+                (reader, writer, Box::new(ctl), wait)
+            }
+            Spawn::Builtin { dest, cmd } => {
+                let p = sshlib::spawn(&dest, cmd.as_deref(), Some((cols, rows))).await?;
+                let exit = p.exit;
+                let wait: Waiter = Box::new(move || exit.blocking_recv().unwrap_or(255));
+                (
+                    Box::new(sshlib::Reader::new(p.rx)),
+                    Box::new(sshlib::Writer(p.tx.clone())),
+                    Box::new(RemoteCtl(p.tx)),
+                    wait,
+                )
+            }
+        };
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let flow = Arc::new(Flow { pending: Mutex::new(0), cv: Condvar::new(), closed: AtomicBool::new(false) });
-        let entry = Arc::new(Entry {
-            writer: Mutex::new(writer),
-            master: Mutex::new(pair.master),
-            killer: Mutex::new(killer),
-            flow: flow.clone(),
-        });
+        let entry = Arc::new(Entry { writer: Mutex::new(writer), ctl, flow: flow.clone() });
         self.ptys.lock().unwrap().insert(id, entry);
 
         // Reader: blocking reads, paused while too much output is unacknowledged.
@@ -117,7 +172,7 @@ impl PtyManager {
         // Waiter: reports the exit code, then drops the PTY so the reader ends.
         let mgr = self.clone();
         std::thread::spawn(move || {
-            let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
+            let code = wait();
             std::thread::sleep(Duration::from_millis(150));
             let _ = chan.send(InvokeResponseBody::Json(json!({ "exit": code }).to_string()));
             mgr.remove(id);
@@ -148,10 +203,7 @@ impl PtyManager {
     }
 
     pub fn resize(&self, id: u32, cols: u16, rows: u16) -> Result<()> {
-        let e = self.get(id)?;
-        let m = e.master.lock().unwrap();
-        m.resize(PtySize { rows: rows.max(2), cols: cols.max(10), pixel_width: 0, pixel_height: 0 })?;
-        Ok(())
+        self.get(id)?.ctl.resize(cols, rows)
     }
 
     pub fn ack(&self, id: u32, bytes: usize) {
@@ -164,7 +216,7 @@ impl PtyManager {
 
     pub fn close(&self, id: u32) {
         if let Ok(e) = self.get(id) {
-            let _ = e.killer.lock().unwrap().kill();
+            e.ctl.kill();
         }
         self.remove(id);
     }

@@ -14,9 +14,9 @@ The primary workload is long-running Claude Code sessions started with `--rc '<n
 | Topic | Decision |
 |---|---|
 | Client shape | GUI with an embedded terminal, one terminal visible at a time |
-| Client platforms | Windows and macOS. Linux desktop is not a target |
+| Client platforms | Windows and macOS; Android (14.4). Linux desktop is not a target |
 | Stack | Tauri 2 (Rust backend) + xterm.js (WebGL renderer) |
-| Transport | The system `ssh` binary, run in a local PTY. No SSH library |
+| Transport | The system `ssh` binary, run in a local PTY. On Android, and for desktop hosts set to `transport = "builtin"`, a built-in SSH client instead (14.4) |
 | Host list | A list in `config.toml`, managed from the Hosts dialog or by hand; names are ssh destinations (usually `~/.ssh/config` aliases), which keeps the connection details |
 | Persistence on macOS/Linux hosts | tmux, one tmux session per destination |
 | Persistence on Windows hosts | A keeper process inside the myterm install holds them (14.1); hosts without it fall back to v1's "ephemeral" sessions |
@@ -328,7 +328,7 @@ Location: `%APPDATA%\myterm\` on Windows, `~/Library/Application Support/myterm/
 | Layer | Choice |
 |---|---|
 | Shell | Tauri 2 |
-| Backend | Rust: `portable-pty`, `tokio`, `serde`, `notify` |
+| Backend | Rust: `portable-pty`, `tokio`, `serde`, `notify`; `russh` (ring crypto) for the built-in SSH client |
 | Frontend | TypeScript + Svelte, `@xterm/xterm` and addons |
 | Fuzzy matching | Small in-process matcher shared by switcher, palette and folder picker |
 | Packaging | Tauri bundler: `.msi`/`.exe` for Windows, `.dmg` for macOS |
@@ -464,6 +464,28 @@ Last-viewed times and known folders are merged under the mapped names, the newer
 **Order.** (1) `ui state` from the chosen machine. (2) Connect any listed host that is not connected. (3) Open the sessions in order, up to the open-session cap, and select the row and window that was on screen. (4) `ui release <this machine>`. Release comes last, so a takeover that fails part-way leaves the old machine as it was.
 
 **Not included.** Moving a running session's process to the new machine. A later "Move here" for Claude sessions alone could copy the conversation from `~/.claude/projects/` and run `claude --resume`, provided the working copy on the new machine matches.
+
+### 14.4 Android client
+
+**Goal.** The whole app on my Android phone: the list, attaching, new sessions, rename and kill, switcher and palette, and needs-attention badges, reaching hosts over the tailnet with ordinary SSH keys. Claude sessions are the main use, but nothing is cut down for the phone.
+
+**Same project.** Tauri 2 builds the phone app from this repo (`npx tauri android init` adds `src-tauri/gen/android`). The frontend, tmux parsing, host tasks and attention rules are shared. What differs is behind `#[cfg(target_os = "android")]` in Rust and a phone layout in the frontend.
+
+**Built-in SSH client.** Android has no `ssh` binary and no `~/.ssh/config`, so there the app speaks SSH itself, with `russh` and the `ring` crypto backend (which cross-compiles without cmake or NASM). Desktop builds keep the system `ssh` and use the built-in client only for hosts set to `transport = "builtin"` under `[hosts.<alias>]`, which is how it is tested.
+
+- **One SSH connection per host.** The host channel, a keeper channel and every attach are separate SSH channels on it, so opening a session costs no new handshake. Keepalive every 15 s, dropped after 2 missed. A channel that does not open within 10 s drops the connection, so the next attempt starts fresh after a network change.
+- **What maps to what.** The host channel (5.1) is an `exec` of `/bin/sh`; the Windows probe and reading `keeper.json` are `exec`s whose output is collected; the keeper channel is an `exec` of `myterm-cli channel`. Attaching (5.3) requests a PTY (`xterm-256color`, the terminal's size) and `exec`s the same tmux or `myterm-cli attach` command; resizes are SSH window-change messages. Ephemeral sessions and interactive login request a PTY and a shell.
+- **Destination.** `address` (default: the alias), `user` and `port` (default 22) under `[hosts.<alias>]`. On desktop, unset fields come from `ssh -G <alias>`, so an existing `~/.ssh/config` alias works as is. A host with no user cannot connect and says so.
+- **Authentication.** Ordinary SSH keys. On desktop, first the unencrypted key files `ssh -G` lists for the host (there is no passphrase prompt). Then the app's own Ed25519 key, `ssh_ed25519` in the data folder, created on first use; this is the phone's key. The Hosts dialog shows its public key with a Copy button, for `authorized_keys`. Last, `none`, which Tailscale SSH accepts on hosts that have it turned on. No passwords and no ssh agent. A host that refuses all of them shows "needs key" and the public key, not "needs interactive login".
+- **Host keys.** The app keeps its own `known_hosts` in the data folder and trusts a host's key the first time. A changed key refuses the connection and says so; "Forget host key" in the host's menu clears it.
+
+**Phone layout.** Below 700 px wide the sidebar becomes a full-screen list and opening a session shows the terminal full screen; Back returns to the list. A row of keys above the on-screen keyboard sends Esc, Tab, Shift+Tab, Ctrl and Alt (both sticky for one key), the arrows, and `~ | / -`. The switcher, palette and new-session flow open from buttons in the header as well as from their keys.
+
+**Backgrounding.** Android suspends the app's connections in the background. On resume the host channels and attach PTYs reconnect through the existing backoff (5.4) and tmux redraws. Desktop notifications (8.4) have no equivalent while the app is closed; a later version can keep a foreground service.
+
+**Not on Android.** The `local` host and local sessions, the local keeper, Take over from (14.3), and opening the ssh config. Hooks install on hosts as on desktop.
+
+**Order.** (1) The built-in client on desktop, behind `transport = "builtin"`. (2) The Android build with the list and terminal working. (3) Phone layout and keys row. (4) Key setup and host editing in the Hosts dialog. (5) Notifications, if wanted.
 
 ## 15. Resolved questions
 

@@ -30,6 +30,13 @@ pub fn now_secs() -> i64 {
 pub struct HostOverride {
     pub tmux_path: Option<String>,
     pub mouse: Option<bool>,
+    /// "builtin" connects with the built-in SSH client (14.4) instead of the
+    /// system ssh. Always so on Android.
+    pub transport: Option<String>,
+    /// Built-in client only; unset fields come from `ssh -G <alias>` on desktop.
+    pub address: Option<String>,
+    pub user: Option<String>,
+    pub port: Option<u16>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -263,6 +270,10 @@ const CONFIG_TEMPLATE: &str = r##"# myterm settings. Changes are picked up autom
 # [hosts.my-server]
 # tmux_path = "/opt/homebrew/bin/tmux"
 # mouse = false
+# transport = "builtin"   # built-in SSH client instead of the system ssh
+# address = "my-server.tailnet.ts.net"   # built-in client only; on desktop,
+# user = "me"                            # unset ones come from ~/.ssh/config
+# port = 22
 "##;
 
 /// Loads config.toml, creating it from a commented template on first run.

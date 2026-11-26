@@ -1,9 +1,23 @@
 //! Live checks against the hosts in ~/.ssh/config. Run with:
 //!   cargo test live -- --ignored --nocapture
+//! MYTERM_BUILTIN=1 uses the built-in SSH client (14.4) instead of ssh.
 
-use crate::channel::{self, Channel, Probe, Target};
-use crate::{sshconfig, tmux};
+use crate::channel::{self, Channel, Probe, Target, Via};
+use crate::{sshconfig, sshlib, tmux};
 use std::time::Duration;
+
+async fn via(h: &str) -> Via {
+    if std::env::var("MYTERM_BUILTIN").is_ok_and(|v| v == "1") {
+        let o = crate::config::load_config().0.hosts.get(h).cloned().unwrap_or_default();
+        Via::Builtin(sshlib::resolve(h, o.address.as_deref(), o.user.as_deref(), o.port).await.unwrap())
+    } else {
+        Via::System(h.to_string())
+    }
+}
+
+async fn open(h: &str) -> std::sync::Arc<Channel> {
+    Channel::spawn(&Target::Remote(via(h).await)).await.unwrap()
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
@@ -17,7 +31,10 @@ async fn live_hosts() {
     let mut tasks = vec![];
     for h in hosts {
         tasks.push(tokio::spawn(async move {
-            let ch = Channel::spawn(&Target::Ssh(h.clone())).unwrap();
+            let ch = match Channel::spawn(&Target::Remote(via(&h).await)).await {
+                Ok(c) => c,
+                Err(e) => return println!("{h}: {e}"),
+            };
             let ov = crate::config::load_config().0.hosts.get(&h).and_then(|o| o.tmux_path.clone());
             let r = ch.run(&tmux::bootstrap_script(ov.as_deref()), Duration::from_secs(20)).await;
             let line = match r {
@@ -41,7 +58,7 @@ async fn live_hosts() {
                 Err(e) => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     let err = ch.stderr_text();
-                    let p = match channel::probe(&h).await {
+                    let p = match channel::probe(&via(&h).await).await {
                         Probe::Windows { powershell } => format!("WINDOWS powershell={powershell}"),
                         Probe::Other(m) => format!("other: {m}"),
                     };
@@ -60,7 +77,7 @@ async fn live_hosts() {
 #[ignore]
 async fn live_rename_window() {
     let h = std::env::var("MYTERM_HOST").unwrap_or("ps-prod".into());
-    let ch = Channel::spawn(&Target::Ssh(h.clone())).unwrap();
+    let ch = open(&h).await;
     let b = tmux::parse_bootstrap(&ch.run(&tmux::bootstrap_script(None), Duration::from_secs(20)).await.unwrap().out);
     let t = b.tmux.unwrap();
     let l = ch.run(&tmux::list_script(&t), Duration::from_secs(10)).await.unwrap();
@@ -89,7 +106,7 @@ async fn live_upload() {
         if only.as_ref().is_some_and(|o| !o.split(',').any(|x| x.trim() == h)) {
             continue;
         }
-        let ch = Channel::spawn(&Target::Ssh(h.clone())).unwrap();
+        let ch = open(&h).await;
         let t = std::time::Instant::now();
         let script = crate::files::upload_script("live.bin", &crate::files::base64(&data));
         match ch.run(&script, Duration::from_secs(60)).await {
@@ -103,4 +120,33 @@ async fn live_upload() {
             Err(e) => println!("{h}: {e}"),
         }
     }
+}
+
+/// A remote PTY through the built-in client: TERM, size, resize, exit code.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn live_builtin_pty() {
+    let h = std::env::var("MYTERM_HOST").unwrap_or("ps-prod".into());
+    let o = crate::config::load_config().0.hosts.get(&h).cloned().unwrap_or_default();
+    let dest = sshlib::resolve(&h, o.address.as_deref(), o.user.as_deref(), o.port).await.unwrap();
+    println!("{dest:?}");
+    let cmd = "echo TERM=$TERM; stty size; read x; stty size; exit 7";
+    let mut p = sshlib::spawn(&dest, Some(cmd), Some((100, 30))).await.unwrap();
+    let mut out = String::new();
+    let mut resized = false;
+    while let Ok(Some(d)) = tokio::time::timeout(Duration::from_secs(10), p.rx.recv()).await {
+        out += &String::from_utf8_lossy(&d);
+        if !resized && out.contains("30 100") {
+            resized = true;
+            p.tx.send(sshlib::In::Resize(120, 40)).unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            p.tx.send(sshlib::In::Data(b"go\r".to_vec())).unwrap();
+        }
+    }
+    let code = p.exit.await.unwrap();
+    println!("{out:?} exit={code}");
+    assert!(out.contains("TERM=xterm-256color"));
+    assert!(out.contains("30 100"));
+    assert!(out.contains("40 120"));
+    assert_eq!(code, 7);
 }

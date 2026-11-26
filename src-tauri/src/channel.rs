@@ -7,8 +7,9 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use crate::sshlib::{self, Dest, In};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
 pub const SSH_OPTS: &[&str] = &[
@@ -43,19 +44,115 @@ pub fn ssh_batch_command(host: &str) -> Command {
     cmd
 }
 
+/// How a remote host is reached: the system `ssh`, or the built-in client (14.4).
+#[derive(Clone, Debug)]
+pub enum Via {
+    System(String),
+    Builtin(Dest),
+}
+
 pub enum Target {
-    Ssh(String),
+    Remote(Via),
     LocalShell,
 }
 
+/// Something to stop when a channel is done: a child process or an SSH channel.
+pub enum Killer {
+    Child(Box<Child>),
+    Builtin(tokio::sync::mpsc::UnboundedSender<In>),
+}
+
+impl Killer {
+    pub fn kill(&mut self) {
+        match self {
+            Killer::Child(c) => {
+                let _ = c.start_kill();
+            }
+            Killer::Builtin(tx) => {
+                let _ = tx.send(In::Close);
+            }
+        }
+    }
+}
+
+/// A non-interactive remote command: its stdin, stdout and collected stderr.
+pub struct Pipe {
+    pub stdin: Box<dyn AsyncWrite + Send + Unpin>,
+    pub stdout: Box<dyn AsyncRead + Send + Unpin>,
+    pub stderr: Arc<StdMutex<String>>,
+    pub killer: Killer,
+}
+
+fn pipe_from(mut cmd: Command) -> Result<Pipe> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    let mut stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
+    let err_buf = Arc::new(StdMutex::new(String::new()));
+    let eb = err_buf.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while let Ok(n) = stderr.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            let mut s = eb.lock().unwrap();
+            s.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if s.len() > 8192 {
+                let cut = s.len() - 4096;
+                let cut = (cut..s.len()).find(|i| s.is_char_boundary(*i)).unwrap_or(0);
+                s.drain(..cut);
+            }
+        }
+    });
+    Ok(Pipe { stdin: Box::new(stdin), stdout: Box::new(stdout), stderr: err_buf, killer: Killer::Child(Box::new(child)) })
+}
+
+/// Starts `remote_cmd` on a host, with no terminal, for a long-lived channel.
+pub async fn batch(via: &Via, remote_cmd: &str) -> Result<Pipe> {
+    match via {
+        Via::System(host) => {
+            let mut cmd = ssh_batch_command(host);
+            cmd.arg(remote_cmd);
+            pipe_from(cmd)
+        }
+        Via::Builtin(dest) => {
+            let p = sshlib::spawn(dest, Some(remote_cmd), None).await?;
+            Ok(Pipe {
+                stdin: Box::new(sshlib::Writer(p.tx.clone())),
+                stdout: Box::new(sshlib::Reader::new(p.rx)),
+                stderr: p.stderr,
+                killer: Killer::Builtin(p.tx),
+            })
+        }
+    }
+}
+
+/// Runs `remote_cmd` on a host with no input; returns (stdout, stderr).
+pub async fn output(via: &Via, remote_cmd: &str, timeout: Duration) -> Result<(String, String)> {
+    match via {
+        Via::System(host) => {
+            let mut cmd = ssh_batch_command(host);
+            cmd.arg(remote_cmd).stdin(Stdio::null()).kill_on_drop(true);
+            let out = tokio::time::timeout(timeout, cmd.output()).await.map_err(|_| anyhow!("timed out"))??;
+            Ok((String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
+        }
+        Via::Builtin(dest) => sshlib::output(dest, remote_cmd, timeout).await,
+    }
+}
+
 struct Io {
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdin: Box<dyn AsyncWrite + Send + Unpin>,
+    stdout: BufReader<Box<dyn AsyncRead + Send + Unpin>>,
 }
 
 pub struct Channel {
     io: Mutex<Io>,
-    child: StdMutex<Option<Child>>,
+    killer: StdMutex<Option<Killer>>,
     stderr: Arc<StdMutex<String>>,
     dead: AtomicBool,
     next_id: AtomicU64,
@@ -67,48 +164,19 @@ pub struct Reply {
 }
 
 impl Channel {
-    pub fn spawn(target: &Target) -> Result<Arc<Channel>> {
-        let mut cmd = match target {
-            Target::Ssh(host) => {
-                let mut c = ssh_batch_command(host);
-                c.arg("/bin/sh");
-                c
-            }
+    pub async fn spawn(target: &Target) -> Result<Arc<Channel>> {
+        let pipe = match target {
+            Target::Remote(via) => batch(via, "/bin/sh").await?,
             Target::LocalShell => {
                 let mut c = Command::new("/bin/sh");
                 no_window(&mut c);
-                c
+                pipe_from(c)?
             }
         };
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-        let mut stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
-        let err_buf = Arc::new(StdMutex::new(String::new()));
-        let eb = err_buf.clone();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 2048];
-            while let Ok(n) = stderr.read(&mut buf).await {
-                if n == 0 {
-                    break;
-                }
-                let mut s = eb.lock().unwrap();
-                s.push_str(&String::from_utf8_lossy(&buf[..n]));
-                if s.len() > 8192 {
-                    let cut = s.len() - 4096;
-                    let cut = (cut..s.len()).find(|i| s.is_char_boundary(*i)).unwrap_or(0);
-                    s.drain(..cut);
-                }
-            }
-        });
         Ok(Arc::new(Channel {
-            io: Mutex::new(Io { stdin, stdout: BufReader::new(stdout) }),
-            child: StdMutex::new(Some(child)),
-            stderr: err_buf,
+            io: Mutex::new(Io { stdin: pipe.stdin, stdout: BufReader::new(pipe.stdout) }),
+            killer: StdMutex::new(Some(pipe.killer)),
+            stderr: pipe.stderr,
             dead: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
         }))
@@ -124,8 +192,8 @@ impl Channel {
 
     pub fn kill(&self) {
         self.dead.store(true, Ordering::SeqCst);
-        if let Some(mut c) = self.child.lock().unwrap().take() {
-            let _ = c.start_kill();
+        if let Some(mut k) = self.killer.lock().unwrap().take() {
+            k.kill();
         }
     }
 
@@ -188,22 +256,16 @@ pub enum Probe {
 
 /// Asks the host's default shell to identify itself. sh leaves `%OS%` alone,
 /// cmd expands it to Windows_NT, PowerShell splits the words onto lines.
-pub async fn probe(host: &str) -> Probe {
-    let mut cmd = ssh_batch_command(host);
-    cmd.arg("echo MTPROBE %OS% $OSTYPE")
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
-    let out = match tokio::time::timeout(Duration::from_secs(15), cmd.output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Probe::Other(e.to_string()),
-        Err(_) => return Probe::Other("timed out".into()),
+pub async fn probe(via: &Via) -> Probe {
+    let (out, err) = match output(via, "echo MTPROBE %OS% $OSTYPE", Duration::from_secs(15)).await {
+        Ok(r) => r,
+        Err(e) => return Probe::Other(e.to_string()),
     };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let first = text.lines().map(str::trim).find(|l| l.starts_with("MTPROBE"));
+    let first = out.lines().map(str::trim).find(|l| l.starts_with("MTPROBE"));
     match first {
         Some(l) if l.contains("Windows_NT") => Probe::Windows { powershell: false },
         Some("MTPROBE") => Probe::Windows { powershell: true },
-        _ => Probe::Other(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        _ => Probe::Other(err.trim().to_string()),
     }
 }
 

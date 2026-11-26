@@ -16,16 +16,16 @@ type Writer = Box<dyn AsyncWrite + Send + Unpin>;
 pub struct KeeperConn {
     io: Mutex<(Reader, Writer)>,
     dead: AtomicBool,
-    child: StdMutex<Option<tokio::process::Child>>,
+    killer: StdMutex<Option<crate::channel::Killer>>,
     pub hello: Hello,
 }
 
 impl KeeperConn {
-    async fn start(r: Box<dyn AsyncRead + Send + Unpin>, w: Writer, child: Option<tokio::process::Child>, timeout: Duration) -> Result<KeeperConn> {
+    async fn start(r: Box<dyn AsyncRead + Send + Unpin>, w: Writer, killer: Option<crate::channel::Killer>, timeout: Duration) -> Result<KeeperConn> {
         let mut conn = KeeperConn {
             io: Mutex::new((BufReader::new(r), w)),
             dead: AtomicBool::new(false),
-            child: StdMutex::new(child),
+            killer: StdMutex::new(killer),
             hello: Hello::default(),
         };
         let v = conn.request(json!({ "op": "hello", "proto": PROTO }), timeout).await?;
@@ -42,35 +42,12 @@ impl KeeperConn {
         Self::start(Box::new(r), Box::new(w), None, Duration::from_secs(5)).await
     }
 
-    /// Runs `remote_cmd` (which starts `myterm-cli channel`) on `host` over ssh.
-    pub async fn ssh(host: &str, remote_cmd: &str) -> Result<KeeperConn> {
-        let mut cmd = crate::channel::ssh_batch_command(host);
-        cmd.arg(remote_cmd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn()?;
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-        let mut stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
-        let err = std::sync::Arc::new(StdMutex::new(String::new()));
-        let e2 = err.clone();
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut b = [0u8; 1024];
-            while let Ok(n) = stderr.read(&mut b).await {
-                if n == 0 {
-                    break;
-                }
-                let mut s = e2.lock().unwrap();
-                if s.len() < 4096 {
-                    s.push_str(&String::from_utf8_lossy(&b[..n]));
-                }
-            }
-        });
+    /// Runs `remote_cmd` (which starts `myterm-cli channel`) on a remote host.
+    pub async fn remote(via: &crate::channel::Via, remote_cmd: &str) -> Result<KeeperConn> {
+        let pipe = crate::channel::batch(via, remote_cmd).await?;
+        let err = pipe.stderr.clone();
         // Starting the keeper on the host (scheduled task or WMI) can take a while.
-        match Self::start(Box::new(stdout), Box::new(stdin), Some(child), Duration::from_secs(40)).await {
+        match Self::start(pipe.stdout, pipe.stdin, Some(pipe.killer), Duration::from_secs(40)).await {
             Ok(c) => Ok(c),
             Err(e) => {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -87,8 +64,8 @@ impl KeeperConn {
 
     pub fn kill(&self) {
         self.dead.store(true, Ordering::SeqCst);
-        if let Some(mut c) = self.child.lock().unwrap().take() {
-            let _ = c.start_kill();
+        if let Some(mut k) = self.killer.lock().unwrap().take() {
+            k.kill();
         }
     }
 
