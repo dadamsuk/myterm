@@ -482,13 +482,13 @@ Last-viewed times and known folders are merged under the mapped names, the newer
 
 **Phone layout.** Below 700 px wide the sidebar becomes a full-screen list and opening a session shows the terminal full screen; Back returns to the list. Dialogs fill the screen, and Back closes the keyboard, then the dialog. A row of keys above the on-screen keyboard sends Esc, Tab, Shift+Tab, Ctrl and Alt (both sticky for one key), the arrows, and `~ | / -`. The switcher, palette and new-session flow open from buttons in the header as well as from their keys.
 
-**Backgrounding.** Android suspends the app's connections in the background. On resume the host channels and attach PTYs reconnect through the existing backoff (5.4) and tmux redraws. Desktop notifications (8.4) have no equivalent while the app is closed; a later version can keep a foreground service.
+**Backgrounding.** Android suspends the app's connections in the background. On resume the host channels and attach PTYs reconnect through the existing backoff (5.4) and tmux redraws. There are no notifications on Android (8.4); they are not wanted there.
 
 **Settings on Android.** There is no editor to hand config.toml to, so the settings button opens it in a text editor in the app. Save refuses text that does not parse and shows the error.
 
 **Not on Android.** The `local` host and local sessions, the local keeper, Take over from (14.3), and opening the ssh config. Hooks install on hosts as on desktop.
 
-**Order.** (1) The built-in client on desktop, behind `transport = "builtin"`. (2) The Android build with the list and terminal working. (3) Phone layout and keys row. (4) Key setup and host editing in the Hosts dialog. (5) Notifications, if wanted.
+**Order.** (1) The built-in client on desktop, behind `transport = "builtin"`. (2) The Android build with the list and terminal working. (3) Phone layout and keys row. (4) Key setup and host editing in the Hosts dialog. All four are done.
 
 ## 15. Resolved questions
 
