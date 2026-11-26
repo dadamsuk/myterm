@@ -19,11 +19,13 @@ Android (spec 14.4). Needs JDK 17, the Android SDK and NDK, `rustup target add a
 
 ```
 export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk" NDK_HOME="$ANDROID_HOME/ndk/<version>"
-npx tauri android build --debug --target aarch64 --apk
-adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+npx tauri android build --target aarch64 --apk
+adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk
 ```
 
-On the phone, config and keys live in the app's private folder (`adb shell run-as net.myterm.app ls`).
+The release build is signed with the debug key unless `src-tauri/gen/android/keystore.properties` (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`; not committed) names another. Either build then installs over the other and keeps the app's data; a different key would mean uninstalling, which deletes the phone's SSH key and config.
+
+On the phone, config and keys live in the app's private folder. A debug build (`--debug`, path `debug/app-universal-debug.apk`) can read them with `adb shell run-as net.myterm.app ls`; a release build cannot.
 
 ## Layout
 

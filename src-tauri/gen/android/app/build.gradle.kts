@@ -14,8 +14,27 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Release signing: keystore.properties (storeFile, storePassword, keyAlias,
+// keyPassword; not committed) when present. Otherwise the debug key, so a
+// release build installs over a debug one and keeps the app's data (its SSH
+// key, config and known hosts).
+val keystoreProperties = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
 android {
     compileSdk = 37
+    signingConfigs {
+        if (keystoreProperties.containsKey("storeFile")) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
     namespace = "net.myterm.app"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
@@ -39,6 +58,7 @@ android {
             }
         }
         getByName("release") {
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             optimization {
                enable = true
             }
