@@ -76,7 +76,7 @@
     <button title="New session{hint(keys?.new_session)}" aria-label="New session" onclick={() => (app.overlay = { kind: "new" })}>
       <svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" /></svg>
     </button>
-    <button title="Hosts: add, order, auto-connect" aria-label="Hosts" onclick={manageHosts}>
+    <button title="Hosts: add, order, auto-connect" aria-label="Hosts" onclick={() => manageHosts()}>
       <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="10" height="4" rx="1" /><rect x="1.5" y="9.5" width="10" height="4" rx="1" /><path d="M13.5 9v5M11 11.5h5" /></svg>
     </button>
     <button title="Switch session{hint(keys?.switcher)}" aria-label="Switch session" onclick={() => (app.overlay = { kind: "switcher" })}>
@@ -198,7 +198,7 @@
             <button class="hide" title="Remove from the host list" onclick={() => removeHost(h.alias)}>×</button>
           </div>
         {/each}
-        <button class="manage" onclick={manageHosts}>Add, order and auto-connect…</button>
+        <button class="manage" onclick={() => manageHosts()}>Add, order and auto-connect…</button>
       </div>
     {/if}
   </div>

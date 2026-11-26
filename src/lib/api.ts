@@ -16,6 +16,16 @@ export interface HostEntry {
   auto_connect: boolean;
 }
 
+/** `[hosts.<alias>]` in config.toml. */
+export interface HostOverride {
+  tmux_path?: string | null;
+  mouse?: boolean | null;
+  transport?: string | null;
+  address?: string | null;
+  user?: string | null;
+  port?: number | null;
+}
+
 /** One `[[saved]]` entry in config.toml: a session to start again later. */
 export interface SavedSession {
   name: string;
@@ -43,6 +53,7 @@ export interface Config {
   mouse: boolean;
   local_shell: string | null;
   saved?: SavedSession[];
+  hosts?: Record<string, HostOverride>;
 }
 
 export interface HostInfo {
@@ -63,6 +74,8 @@ export interface HostInfo {
   win_powershell: boolean;
   hooks_installed: boolean;
   user: string | null;
+  /** Reached with the built-in SSH client (spec 14.4). */
+  builtin: boolean;
 }
 
 export interface Session {
@@ -176,6 +189,10 @@ export const api = {
   attachCommandText: (host: string, slug: string) => invoke<string>("attach_command_text", { host, slug }),
   reconnectHost: (host: string) => invoke<void>("reconnect_host", { host }),
   setHosts: (hosts: HostEntry[]) => invoke<void>("set_hosts", { hosts }),
+  setHostDetails: (host: string, address: string | null, user: string | null, port: number | null) =>
+    invoke<void>("set_host_details", { host, address, user, port }),
+  forgetHostKey: (host: string) => invoke<void>("forget_host_key", { host }),
+  builtinPublicKey: () => invoke<string>("builtin_public_key"),
   setSaved: (saved: SavedSession[]) => invoke<void>("set_saved", { saved }),
   sshAliases: () => invoke<string[]>("ssh_aliases"),
   hooksPlan: (host: string, install: boolean) => invoke<HookPlan>("hooks_plan", { host, install }),

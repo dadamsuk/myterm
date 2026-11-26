@@ -1,25 +1,85 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { writeText } from "@tauri-apps/plugin-clipboard-manager";
   import { api, type HostEntry } from "../lib/api";
-  import { app, hostInfo } from "../lib/store.svelte";
+  import { app, hostInfo, toast } from "../lib/store.svelte";
   import { hostAction, hostEntries, openSshConfig, saveHosts } from "../lib/actions";
   import { hostColor, hostStatus } from "../lib/hostdot";
 
   // Edited here and written through on every change; the snapshot that
   // follows carries the new order back into app.hosts.
+  let { focusHost }: { focusHost?: string } = $props();
+
   let list = $state<HostEntry[]>(untrack(hostEntries));
+  const android = app.platform === "android";
+  // Built-in client hosts (spec 14.4) have their address, user and port here.
+  let anyBuiltin = $derived(android || app.hosts.some((h) => h.builtin));
+  type Det = { address: string; user: string; port: string };
+  const blank = (): Det => ({ address: "", user: "", port: "" });
+  function details(alias: string): Det {
+    const o = app.config?.hosts?.[alias];
+    return { address: o?.address ?? "", user: o?.user ?? "", port: o?.port ? String(o.port) : "" };
+  }
+  let editing = $state<string | null>(untrack(() => focusHost ?? null));
+  let det = $state<Det>(untrack(() => (focusHost ? details(focusHost) : blank())));
+  let newDet = $state<Det>(blank());
+  let publicKey = $state("");
+
+  function toggleEdit(alias: string) {
+    editing = editing === alias ? null : alias;
+    if (editing) det = details(alias);
+  }
+
+  const portOf = (s: string) => {
+    const n = parseInt(s.trim(), 10);
+    return n > 0 && n < 65536 ? n : null;
+  };
+  async function saveDetails(alias: string, d: Det) {
+    try {
+      await api.setHostDetails(alias, d.address.trim() || null, d.user.trim() || null, portOf(d.port));
+      return true;
+    } catch (e) {
+      toast(String(e), true);
+      return false;
+    }
+  }
+  async function saveEdit(alias: string) {
+    if (await saveDetails(alias, det)) {
+      editing = null;
+      toast(`Saved; reconnecting ${alias}`);
+    }
+  }
+  async function forgetKey(alias: string) {
+    try {
+      await api.forgetHostKey(alias);
+      toast(`Forgot the host key of ${alias}; the next connection trusts the key it offers`);
+    } catch (e) {
+      toast(String(e), true);
+    }
+  }
+  async function copyKey() {
+    try {
+      await writeText(publicKey);
+      // Android confirms a copy itself.
+      if (!android) toast("Public key copied");
+    } catch (e) {
+      toast(String(e), true);
+    }
+  }
   let aliases = $state<string[]>([]);
   let name = $state("");
   let autoConnect = $state(true);
   let input: HTMLInputElement;
 
   onMount(() => {
-    input.focus();
+    // On a phone, focusing would open the keyboard over the list.
+    if (!app.phone) input.focus();
     api.sshAliases().then((a) => (aliases = a)).catch(() => {});
+    if (untrack(() => anyBuiltin)) api.builtinPublicKey().then((k) => (publicKey = k)).catch(() => {});
   });
 
   let suggestions = $derived(
-    ["local", ...aliases].filter((a) => !list.some((h) => h.name === a)),
+    [...(android ? [] : ["local"]), ...aliases].filter((a) => !list.some((h) => h.name === a)),
   );
 
   function commit(next: HostEntry[]) {
@@ -27,12 +87,19 @@
     saveHosts($state.snapshot(next));
   }
 
-  function add() {
+  async function add() {
     const n = name.trim();
     if (!n) return;
-    if (!list.some((h) => h.name === n)) commit([...list, { name: n, auto_connect: autoConnect }]);
+    if (!list.some((h) => h.name === n)) {
+      // Details first, so the host's first connection uses them.
+      if (android && (newDet.address.trim() || newDet.user.trim() || newDet.port.trim())) {
+        if (!(await saveDetails(n, newDet))) return;
+      }
+      commit([...list, { name: n, auto_connect: autoConnect }]);
+    }
     name = "";
-    input.focus();
+    newDet = blank();
+    if (!app.phone) input.focus();
   }
 
   function move(i: number, d: number) {
@@ -88,10 +155,14 @@
 </script>
 
 <div class="backdrop" role="presentation" onpointerdown={(e) => e.target === e.currentTarget && (app.overlay = null)}>
-  <div class="dialog" role="dialog" aria-label="Hosts">
+  <div class="dialog" class:phone={app.phone} role="dialog" aria-label="Hosts">
     <div class="head">
       <span class="title">Hosts</span>
       <span class="faint">shown in this order</span>
+      {#if app.phone}
+        <span class="grow"></span>
+        <button class="btn" onclick={() => (app.overlay = null)}>Done</button>
+      {/if}
     </div>
 
     <div class="rows" bind:this={rowsEl}>
@@ -121,8 +192,30 @@
           </label>
           <button class="icon" title="Move up" aria-label="Move up" disabled={i === 0} onclick={() => move(i, -1)}>↑</button>
           <button class="icon" title="Move down" aria-label="Move down" disabled={i === list.length - 1} onclick={() => move(i, 1)}>↓</button>
+          {#if info?.builtin || (android && !info)}
+            <button
+              class="icon"
+              class:on={editing === h.name}
+              title="Address, user and port"
+              aria-label="Edit {h.name}"
+              onclick={() => toggleEdit(h.name)}>✎</button
+            >
+          {/if}
           <button class="icon x" title="Remove from the list" aria-label="Remove" onclick={() => remove(i)}>×</button>
         </div>
+        {#if editing === h.name}
+          <div class="details">
+            <label>Address <input bind:value={det.address} placeholder={android ? "100.x.y.z or name.ts.net" : "from ~/.ssh/config"} spellcheck="false" autocomplete="off" autocapitalize="none" /></label>
+            <label>User <input bind:value={det.user} placeholder={android ? "required" : "from ~/.ssh/config"} spellcheck="false" autocomplete="off" autocapitalize="none" /></label>
+            <label class="port">Port <input bind:value={det.port} placeholder="22" inputmode="numeric" /></label>
+            <div class="dbtns">
+              <button class="btn" title="After a host is reinstalled: trust the key it offers next" onclick={() => forgetKey(h.name)}>Forget host key</button>
+              <span class="grow"></span>
+              <button class="btn" onclick={() => (editing = null)}>Cancel</button>
+              <button class="btn primary" onclick={() => saveEdit(h.name)}>Save</button>
+            </div>
+          </div>
+        {/if}
       {:else}
         <div class="empty">No hosts. Add one below.</div>
       {/each}
@@ -134,7 +227,8 @@
         bind:value={name}
         onkeydown={key}
         list="ssh-aliases"
-        placeholder="Host: an ssh config alias such as intra, or user@server"
+        placeholder={android ? "Name, e.g. intra" : "Host: an ssh config alias such as intra, or user@server"}
+        autocapitalize="none"
         spellcheck="false"
         autocomplete="off"
       />
@@ -147,6 +241,13 @@
       </label>
       <button class="btn primary" disabled={!name.trim()} onclick={add}>Add</button>
     </div>
+    {#if android}
+      <div class="details newdet">
+        <label>Address <input bind:value={newDet.address} placeholder="100.x.y.z or name.ts.net" spellcheck="false" autocomplete="off" autocapitalize="none" /></label>
+        <label>User <input bind:value={newDet.user} placeholder="e.g. admin" spellcheck="false" autocomplete="off" autocapitalize="none" /></label>
+        <label class="port">Port <input bind:value={newDet.port} placeholder="22" inputmode="numeric" /></label>
+      </div>
+    {/if}
     {#if suggestions.length}
       <div class="chips">
         <span class="faint">From ~/.ssh/config:</span>
@@ -155,10 +256,27 @@
         {/each}
       </div>
     {/if}
+    {#if anyBuiltin && publicKey}
+      <div class="key">
+        <div class="khead">
+          <span>{android ? "This phone's key" : "myterm's own key"}</span>
+          <button class="btn" onclick={copyKey}>Copy</button>
+        </div>
+        <code class="ktext">{publicKey}</code>
+        <div class="faint">
+          Add it to <code>~/.ssh/authorized_keys</code> on each host. On Windows, for an administrator:
+          <code>C:\ProgramData\ssh\administrators_authorized_keys</code>.
+        </div>
+      </div>
+    {/if}
     <div class="foot faint">
-      Saved to config.toml as <code>[[host]]</code> entries, which you can also edit by hand.
-      Connection details (HostName, User, keys) stay in
-      <button class="link" onclick={openSshConfig}>~/.ssh/config</button>.
+      {#if android}
+        Saved to config.toml in the app's data folder.
+      {:else}
+        Saved to config.toml as <code>[[host]]</code> entries, which you can also edit by hand.
+        Connection details (HostName, User, keys) stay in
+        <button class="link" onclick={openSshConfig}>~/.ssh/config</button>.
+      {/if}
     </div>
   </div>
 </div>
@@ -166,6 +284,116 @@
 <style>
   .dialog {
     width: min(680px, 94vw);
+  }
+  /* Phone: one full-screen page that scrolls as a whole. */
+  .dialog.phone {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    max-height: none;
+    border-radius: 0;
+    border: 0;
+    overflow-y: auto;
+  }
+  .dialog.phone .head {
+    align-items: center;
+  }
+  .dialog.phone .rows {
+    overflow: visible;
+    flex-shrink: 0;
+  }
+  .dialog.phone .details label:first-child {
+    flex-basis: 100%;
+  }
+  /* Phone: the status goes on a line of its own under the name. */
+  .dialog.phone .hrow {
+    flex-wrap: wrap;
+    row-gap: 0;
+    padding: 6px 8px;
+  }
+  .dialog.phone .name {
+    flex: 1;
+  }
+  .dialog.phone .st {
+    order: 10;
+    flex-basis: 100%;
+    padding-left: 34px;
+  }
+  .dialog.phone .icon {
+    padding: 6px 9px;
+    font-size: 16px;
+  }
+  .icon.on {
+    background: var(--selected);
+    color: var(--fg);
+  }
+  .details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 6px 10px 10px 34px;
+  }
+  .details.newdet {
+    padding: 0 14px 10px;
+  }
+  .details label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    flex: 1 1 140px;
+    min-width: 0;
+  }
+  .details label.port {
+    flex: 0 0 64px;
+  }
+  .details input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 8px;
+    outline: none;
+    color: var(--fg);
+    width: 100%;
+  }
+  /* 16 px stops the phone zooming in on a focused field. */
+  .dialog.phone input:not([type]) {
+    font-size: 16px;
+  }
+  .details input:focus {
+    border-color: var(--accent);
+  }
+  .dbtns {
+    display: flex;
+    gap: 8px;
+    flex-basis: 100%;
+  }
+  .grow {
+    flex: 1;
+  }
+  .key {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .khead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+  .ktext {
+    display: block;
+    word-break: break-all;
+    user-select: all;
+    background: var(--bg);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    font-size: 11px;
   }
   .head {
     display: flex;

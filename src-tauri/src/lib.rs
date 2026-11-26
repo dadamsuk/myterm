@@ -207,6 +207,19 @@ async fn forget_host_key(app: State<'_, Arc<App>>, host: String) -> R<()> {
 }
 
 #[tauri::command]
+async fn set_host_details(
+    app: State<'_, Arc<App>>,
+    host: String,
+    address: Option<String>,
+    user: Option<String>,
+    port: Option<u16>,
+) -> R<()> {
+    app.set_host_details(&host, address, user, port).await.map_err(err)?;
+    reload_config(app.inner());
+    Ok(())
+}
+
+#[tauri::command]
 async fn reconnect_host(app: State<'_, Arc<App>>, host: String) -> R<()> {
     app.reconnect(&host).await.map_err(err)
 }
@@ -494,6 +507,7 @@ pub fn run() {
             boot,
             builtin_public_key,
             forget_host_key,
+            set_host_details,
             snapshot,
             attach,
             open_login,

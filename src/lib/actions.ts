@@ -248,7 +248,11 @@ export function autostartSaved() {
 }
 
 export function hostAction(h: HostInfo) {
-  if (h.needs_login) {
+  if (h.status.startsWith("needs key")) {
+    // The built-in client has no key the host accepts: show the key and
+    // the host's details.
+    manageHosts(h.alias);
+  } else if (h.needs_login) {
     terminals.openLogin(h.alias);
   } else {
     reconnectHost(h.alias);
@@ -292,9 +296,9 @@ export async function openSettings() {
   }
 }
 
-export function manageHosts() {
+export function manageHosts(host?: string) {
   app.sidebarPeek = false;
-  app.overlay = { kind: "hosts" };
+  app.overlay = { kind: "hosts", host };
 }
 
 export async function openSshConfig() {

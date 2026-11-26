@@ -749,6 +749,34 @@ impl App {
         Ok(())
     }
 
+    /// Saves a host's built-in client details (address, user, port) and
+    /// reconnects it with them.
+    pub async fn set_host_details(
+        &self,
+        host: &str,
+        address: Option<String>,
+        user: Option<String>,
+        port: Option<u16>,
+    ) -> Result<()> {
+        // The pooled connection is keyed by the old details.
+        if let Ok(Via::Builtin(old)) = self.via(host).await {
+            sshlib::forget_connection(&old);
+        }
+        config::write_host_details(host, address.as_deref(), user.as_deref(), port)?;
+        {
+            let mut c = self.config.write().unwrap();
+            let o = c.hosts.entry(host.to_string()).or_default();
+            let clean = |v: Option<String>| v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+            o.address = clean(address);
+            o.user = clean(user);
+            o.port = port.filter(|p| *p != 22);
+        }
+        if self.host(host).is_ok() {
+            self.reconnect(host).await?;
+        }
+        Ok(())
+    }
+
     /// Clears a built-in-client host's stored host key, then reconnects.
     pub async fn forget_host_key(&self, host: &str) -> Result<()> {
         let Via::Builtin(dest) = self.via(host).await? else {

@@ -97,6 +97,13 @@
   let docked = $derived(!app.sidebarAutoHide && !app.sidebarCollapsed);
   // Phone layout: the list, or a terminal full screen.
   let phoneList = $derived(app.phoneList || !app.active);
+  // Phone: a dialog gets a history entry, so Back closes it.
+  $effect(() => {
+    const open = app.phone && app.overlay !== null;
+    const top = untrack(() => history.state?.myterm === "overlay");
+    if (open && !top) history.pushState({ myterm: "overlay" }, "");
+    else if (!open && top) history.back();
+  });
   const measure = () => (app.phone = window.innerWidth < 700);
   measure();
   let enterTimer: ReturnType<typeof setTimeout> | undefined;
@@ -167,8 +174,13 @@
   onMount(() => {
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("resize", measure);
-    // Back from a terminal (gesture or button) shows the list again.
-    const onPop = () => (app.phoneList = true);
+    // Phone: Back (gesture or button) closes a dialog, else leaves the
+    // terminal for the list. The history entry says which screen is on.
+    const onPop = () => {
+      const s = history.state?.myterm;
+      if (s !== "overlay" && app.overlay) app.overlay = null;
+      app.phoneList = s !== "term";
+    };
     window.addEventListener("popstate", onPop);
     terminals.onShow = () => showPhoneTerminal();
     const unlisten: Promise<() => void>[] = [];
@@ -237,7 +249,7 @@
 {:else if app.overlay?.kind === "confirm-quit"}
   <ConfirmQuit count={app.overlay.count} />
 {:else if app.overlay?.kind === "hosts"}
-  <HostsDialog />
+  <HostsDialog focusHost={app.overlay.host} />
 {:else if app.overlay?.kind === "save"}
   <SaveSession row={app.overlay.row} saved={app.overlay.saved} />
 {/if}

@@ -136,7 +136,7 @@
       detail: "interactive ssh, for hosts that need a passphrase or host-key confirmation",
       run: () => pickHost("Log in to which host?", shown().filter((h) => !h.local), (h) => { done(); terminals.openLogin(h.alias); }),
     },
-    { label: "Hosts…", detail: "add, remove, order, auto-connect", run: manageHosts },
+    { label: "Hosts…", detail: "add, remove, order, auto-connect", run: () => manageHosts() },
     { label: "Remove host from the list", run: () => pickHost("Remove which host?", shown(), (h) => { done(); removeHost(h.alias); }) },
     {
       label: "Install attention hooks on host…",

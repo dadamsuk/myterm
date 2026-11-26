@@ -371,6 +371,49 @@ fn with_hosts(text: &str, list: &[HostEntry]) -> anyhow::Result<String> {
     Ok(doc.to_string())
 }
 
+/// Built-in client details for one host (`[hosts.<alias>]` address, user,
+/// port), preserving the rest of the file. None or empty removes a field.
+pub fn write_host_details(alias: &str, address: Option<&str>, user: Option<&str>, port: Option<u16>) -> anyhow::Result<()> {
+    let path = config_path();
+    let _ = std::fs::create_dir_all(data_dir());
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| CONFIG_TEMPLATE.to_string());
+    std::fs::write(&path, with_host_details(&text, alias, address, user, port)?)?;
+    Ok(())
+}
+
+fn with_host_details(
+    text: &str,
+    alias: &str,
+    address: Option<&str>,
+    user: Option<&str>,
+    port: Option<u16>,
+) -> anyhow::Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    if !doc.contains_key("hosts") {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        doc["hosts"] = toml_edit::Item::Table(t);
+    }
+    let hosts = doc["hosts"].as_table_mut().ok_or_else(|| anyhow::anyhow!("config.toml: hosts is not a table"))?;
+    if !hosts.contains_key(alias) {
+        hosts[alias] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let t = hosts[alias].as_table_mut().ok_or_else(|| anyhow::anyhow!("config.toml: hosts.{alias} is not a table"))?;
+    let set = |t: &mut toml_edit::Table, k: &str, v: Option<toml_edit::Item>| match v {
+        Some(v) => {
+            t[k] = v;
+        }
+        None => {
+            t.remove(k);
+        }
+    };
+    let s = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(|v| toml_edit::value(v.to_string()));
+    set(t, "address", s(address));
+    set(t, "user", s(user));
+    set(t, "port", port.filter(|p| *p != 22).map(|p| toml_edit::value(p as i64)));
+    Ok(doc.to_string())
+}
+
 /// Writes the `[[saved]]` list, preserving the rest of the file.
 pub fn write_saved(list: &[SavedSession]) -> anyhow::Result<()> {
     let path = config_path();
@@ -504,6 +547,26 @@ pub fn save_state(s: &State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_details_round_trip() {
+        let text = "font_size = 13
+
+[hosts.intra]
+mouse = false
+";
+        let out = with_host_details(text, "intra", Some(" 100.1.2.3 "), Some("admin"), Some(2222)).unwrap();
+        let out = with_host_details(&out, "new.host", Some("10.0.0.1"), None, Some(22)).unwrap();
+        let c: Config = toml::from_str(&out).unwrap();
+        let i = &c.hosts["intra"];
+        assert_eq!((i.address.as_deref(), i.user.as_deref(), i.port, i.mouse), (Some("100.1.2.3"), Some("admin"), Some(2222), Some(false)));
+        let n = &c.hosts["new.host"];
+        assert_eq!((n.address.as_deref(), n.user.as_deref(), n.port), (Some("10.0.0.1"), None, None));
+        let out = with_host_details(&out, "intra", None, Some(""), None).unwrap();
+        let c: Config = toml::from_str(&out).unwrap();
+        assert_eq!(c.hosts["intra"], HostOverride { mouse: Some(false), ..Default::default() });
+        assert!(out.starts_with("font_size = 13"));
+    }
 
     #[test]
     fn host_list_parses_in_order() {
