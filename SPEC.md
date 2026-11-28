@@ -183,7 +183,7 @@ Toggle modes:
 
 In every mode, sessions that need attention stay where they are in the list and are highlighted: an orange bar and tint for a permission wait, green for finished-but-unseen. Setting `pin_attention = true` also moves them into a "Needs you" section at the top.
 
-Right-click on a row: rename, kill (immediate, no confirmation), copy the manual `ssh … tmux attach` command. Rename runs `tmux rename-window` on the host, so the name is tmux's own and shows in its status bar too. Kill runs `kill-window`; killing a session's last window ends the session.
+Right-click on a row: rename, kill (immediate, no confirmation), refresh, copy the manual `ssh … tmux attach` command. Refresh (also in the terminal's right-click menu and the palette) replaces a tmux session's terminal with a new one attached afresh, as reopening myterm does, for a screen left garbled; tmux redraws it. Rename runs `tmux rename-window` on the host, so the name is tmux's own and shows in its status bar too. Kill runs `kill-window`; killing a session's last window ends the session.
 
 ### 6.3 Quick switcher — Ctrl+Shift+O
 

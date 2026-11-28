@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from "../lib/store.svelte";
   import { copyAttachCommand, findSaved, killRow } from "../lib/actions";
+  import { terminals } from "../lib/terminals";
   import { rowName } from "../lib/store.svelte";
 
   let menu = $derived(app.menu!);
@@ -29,6 +30,11 @@
     {findSaved(menu.row.s.host, rowName(menu.row)) ? "Edit saved session…" : "Save session…"}
   </button>
   {#if menu.row.s.persistent}
+    <button
+      role="menuitem"
+      title="Attach again with a new terminal, as reopening myterm does, when the screen is garbled"
+      onclick={() => { const key = menu.row.s.key; close(); terminals.refresh(key); }}>Refresh</button
+    >
     <button role="menuitem" onclick={() => copyAttachCommand(menu.row.s)}>Copy attach command</button>
   {/if}
 </div>

@@ -594,6 +594,27 @@ class TerminalManager {
     this.connect(e);
   }
 
+  /**
+   * Refresh: a new terminal attached afresh, as reopening myterm does, for a
+   * screen left garbled. Only tmux sessions, which survive the detach; tmux
+   * redraws the whole screen for the new client.
+   */
+  refresh(key: string) {
+    const s = sessionByKey(key);
+    if (!s?.persistent) return;
+    const e = this.entries.get(key);
+    const wasActive = app.active === key;
+    const lastShown = e?.lastShown ?? Date.now();
+    if (e) this.dispose(key);
+    if (wasActive || !e) {
+      this.quietShow = true;
+      this.open(s);
+      this.quietShow = false;
+    } else {
+      this.openHidden(s, lastShown);
+    }
+  }
+
   show(key: string) {
     const prev = app.active;
     if (prev && prev !== key && sessionByKey(prev)) markViewed(prev);

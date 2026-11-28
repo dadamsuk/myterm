@@ -96,6 +96,16 @@
     },
     { label: "Kill…", run: () => pickRow("Kill which?", (r) => { done(); killRow(r); }) },
     {
+      label: "Refresh terminal",
+      detail: "the session on screen: attach again with a new terminal",
+      run: () => {
+        const s = sessionByKey(app.active);
+        done();
+        if (s?.persistent) terminals.refresh(s.key);
+        else toast("No tmux session on screen", true);
+      },
+    },
+    {
       label: "Copy attach command",
       run: () => {
         const s = sessionByKey(app.active);

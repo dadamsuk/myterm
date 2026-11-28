@@ -35,8 +35,9 @@
   {#if !terminals.isTmux(menu.key)}
     <button role="menuitem" onclick={() => run((k) => terminals.clear(k))}><span>Clear scrollback</span></button>
     <button role="menuitem" onclick={() => run((k) => terminals.resetModes(k))}><span>Reset terminal modes</span></button>
-  {:else if !menu.selection}
-    <div class="note">Shift+drag selects text in tmux</div>
+  {:else}
+    <button role="menuitem" title="Attach again with a new terminal, when the screen is garbled" onclick={() => run((k) => terminals.refresh(k))}><span>Refresh</span></button>
+    {#if !menu.selection}<div class="note">Shift+drag selects text in tmux</div>{/if}
   {/if}
 </div>
 
