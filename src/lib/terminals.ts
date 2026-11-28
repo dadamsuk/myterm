@@ -156,6 +156,10 @@ class TerminalManager {
       macOptionClickForcesSelection: true,
       // Shift+drag does a native selection while tmux has the mouse.
       altClickMovesCursor: false,
+      // Links programs mark up (OSC 8, as Claude Code prints them). xterm's
+      // default asks with confirm() and then calls window.open, which the
+      // webview ignores.
+      linkHandler: { activate: (ev, uri) => openLink(ev, uri), allowNonHttpProtocols: false },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -167,10 +171,7 @@ class TerminalManager {
     const unicode = new Unicode11Addon();
     term.loadAddon(unicode);
     term.unicode.activeVersion = "11";
-    term.loadAddon(new WebLinksAddon((ev, uri) => {
-      ev.preventDefault();
-      openUrl(uri).catch(() => {});
-    }));
+    term.loadAddon(new WebLinksAddon((ev, uri) => openLink(ev, uri)));
     term.loadAddon(new ClipboardAddon(undefined, clipboardProvider));
     try {
       const webgl = new WebglAddon();
@@ -768,6 +769,13 @@ function applyMods(d: string): string {
     else if (d === "?") d = "\x7f";
   }
   return alt ? "\x1b" + d : d;
+}
+
+/** Opens a link from a terminal in the system browser. */
+function openLink(ev: MouseEvent, uri: string) {
+  ev.preventDefault();
+  if (!/^https?:\/\//i.test(uri)) return;
+  openUrl(uri).catch((e) => toast(`Could not open ${uri}: ${e}`, true));
 }
 
 export const terminals = new TerminalManager();
